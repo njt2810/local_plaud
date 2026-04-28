@@ -465,9 +465,10 @@ def diarize(audio_path: Path, segments: list[dict]) -> tuple[list[dict], int]:
     with Spinner("Running diarization"):
         diarization = pipeline({"waveform": waveform, "sample_rate": sample_rate})
 
-    # Build speaker turns
+    # Build speaker turns — unwrap DiarizeOutput if newer pyannote version
+    annotation = diarization.diarization if hasattr(diarization, "diarization") else diarization
     turns = []
-    for turn, _, speaker in diarization.itertracks(yield_label=True):
+    for turn, _, speaker in annotation.itertracks(yield_label=True):
         turns.append({"start": turn.start, "end": turn.end, "speaker": speaker})
 
     def best_speaker(seg_start: float, seg_end: float) -> str:
