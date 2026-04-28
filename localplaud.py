@@ -444,8 +444,22 @@ def diarize(audio_path: Path, segments: list[dict]) -> tuple[list[dict], int]:
     print()
 
     with Spinner("Loading audio waveform"):
-        waveform, sample_rate = torchaudio.load(str(audio_path))
-    print_ok("Waveform loaded  (TorchCodec bypassed)")
+        try:
+            waveform, sample_rate = torchaudio.load(str(audio_path))
+        except Exception:
+            import av as _av, numpy as _np
+            _con = _av.open(str(audio_path))
+            sample_rate = _con.streams.audio[0].codec_context.sample_rate
+            _rs = _av.audio.resampler.AudioResampler(format="fltp")
+            _chunks = []
+            for _f in _con.decode(audio=0):
+                _f.pts = None
+                for _o in _rs.resample(_f):
+                    _chunks.append(_o.to_ndarray())
+            _con.close()
+            _arr = _np.concatenate(_chunks, axis=1).astype(_np.float32) if _chunks else _np.zeros((1, 0), dtype=_np.float32)
+            waveform = torch.from_numpy(_arr)
+    print_ok("Waveform loaded")
     print()
 
     with Spinner("Running diarization"):
