@@ -241,6 +241,8 @@ def clear_state(stem: str):
 def list_incomplete_states() -> list[dict]:
     states = []
     for p in DIR_STATE.glob("*.json"):
+        if p.stem.endswith("_tx"):
+            continue
         try:
             with open(p, "r", encoding="utf-8") as f:
                 s = json.load(f)
@@ -250,6 +252,32 @@ def list_incomplete_states() -> list[dict]:
         except Exception:
             pass
     return states
+
+def tx_archive_path(stem: str) -> Path:
+    return DIR_STATE / f"{stem}_tx.json"
+
+def save_tx_archive(stem: str, state: dict):
+    """Permanent transcript archive — survives completion, enables reprocess from any step."""
+    p = tx_archive_path(stem)
+    archive = {k: state[k] for k in (
+        "audio_filename", "meeting_date", "audio_duration",
+        "transcript", "user_context", "continuation",
+    )}
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(archive, f, ensure_ascii=False, indent=2)
+
+def list_tx_archives() -> list[dict]:
+    archives = []
+    for p in DIR_STATE.glob("*_tx.json"):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                a = json.load(f)
+            a["_archive_file"] = str(p)
+            a["_stem"] = p.stem[:-3]  # strip _tx suffix
+            archives.append(a)
+        except Exception:
+            pass
+    return archives
 
 # ---------------------------------------------------------------------------
 # File utilities
@@ -1004,6 +1032,7 @@ def process_file(audio_path: Path, state: dict | None = None):
             state["transcript"], state["audio_duration"] = transcribe(audio_path)
         state["current_step"] = 4
         save_state(stem, state)
+        save_tx_archive(stem, state)
 
     # -----------------------------------------------------------------------
     # Step 4: DIARIZATION
@@ -1279,6 +1308,82 @@ def option_resume():
 
     process_file(audio_path, load_state(stem))
 
+def option_reprocess():
+    print_section("REPROCESS FROM STEP")
+    archives = list_tx_archives()
+    if not archives:
+        print_info("No transcript archives found.")
+        print_info("Archives are saved automatically after transcription on future runs.")
+        return
+
+    print(f"  {C.DIM}{len(archives)} transcript archive(s){C.RESET}")
+    print()
+    for i, a in enumerate(archives, 1):
+        fname   = a.get("audio_filename", "unknown")
+        date    = a.get("meeting_date", "unknown date")
+        dur     = a.get("audio_duration", 0)
+        dur_str = f"{int(dur)//60}m {int(dur)%60}s" if dur else "?"
+        print(f"  {C.CYAN}[{i}]{C.RESET}  {C.WHITE}{fname}{C.RESET}  {C.DIM}·  {date}  ·  {dur_str}{C.RESET}")
+    print()
+
+    choice = safe_input("Select archive (Enter to cancel):", buffer=True)
+    if not choice.isdigit() or not (1 <= int(choice) <= len(archives)):
+        return
+
+    a     = archives[int(choice) - 1]
+    stem  = a["_stem"]
+    fname = a.get("audio_filename", "")
+
+    print()
+    print(f"  {C.DIM}RESTART FROM:{C.RESET}")
+    print(f"  {C.CYAN}[4]{C.RESET}  Speaker ID  {C.DIM}(re-runs diarization → summarise → save){C.RESET}")
+    print(f"  {C.CYAN}[5]{C.RESET}  Summarise   {C.DIM}(skips diarization, re-generates notes + PDF){C.RESET}")
+    print()
+
+    step_choice = safe_input("Choose step (4/5, Enter to cancel):", buffer=True)
+    if step_choice not in ("4", "5"):
+        return
+
+    restart_step = int(step_choice)
+
+    state = {
+        "current_step":   restart_step,
+        "audio_filename": a["audio_filename"],
+        "meeting_date":   a["meeting_date"],
+        "transcript":     a["transcript"],
+        "audio_duration": a.get("audio_duration", 0),
+        "has_speakers":   False,
+        "speaker_count":  0,
+        "notes":          None,
+        "topic":          None,
+        "token_in":       0,
+        "token_out":      0,
+        "cost":           0.0,
+        "user_context":   a.get("user_context", ""),
+        "continuation":   a.get("continuation"),
+        "md_path":        None,
+        "pdf_path":       None,
+    }
+
+    candidates = [
+        DIR_COMPLETED       / fname,
+        DIR_NOT_TRANSCRIBED / fname,
+        ROOT                / fname,
+    ]
+    audio_path = next((c for c in candidates if c.exists()), None)
+
+    if audio_path is None:
+        print_warn(f"Audio file not found: {fname}")
+        print_info("Move the file back to 'Recordings/Not Transcribed/' and try again.")
+        return
+
+    ans = safe_input(f"Restart from step {restart_step} for '{fname}'? (Y/N):", buffer=True).upper()
+    if ans != "Y":
+        return
+
+    save_state(stem, state)
+    process_file(audio_path, state)
+
 # ---------------------------------------------------------------------------
 # Main menu
 # ---------------------------------------------------------------------------
@@ -1299,6 +1404,7 @@ def print_main_menu():
     print(f"  {C.CYAN}[2]{C.RESET}  Scan Not Transcribed folder")
     print(f"  {C.CYAN}[3]{C.RESET}  Batch process queue")
     print(f"  {C.CYAN}[4]{C.RESET}  Resume checkpoint")
+    print(f"  {C.CYAN}[5]{C.RESET}  Reprocess from step  {C.DIM}(redo speaker ID or summary){C.RESET}")
     print()
 
 def main():
@@ -1307,7 +1413,7 @@ def main():
     while True:
         print_main_menu()
 
-        choice = safe_input("Select [1-4]:")
+        choice = safe_input("Select [1-5]:")
         if choice == "1":
             option_browse()
         elif choice == "2":
@@ -1316,8 +1422,10 @@ def main():
             option_batch()
         elif choice == "4":
             option_resume()
+        elif choice == "5":
+            option_reprocess()
         else:
-            print_warn("Enter 1, 2, 3, or 4.")
+            print_warn("Enter 1, 2, 3, 4, or 5.")
             continue
 
         print()
