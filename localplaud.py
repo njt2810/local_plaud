@@ -788,6 +788,15 @@ def generate_pdf(notes_md: str, output_path: Path, meeting_date: str, topic: str
     story.append(Paragraph(f"Meeting Notes  |  {meeting_date}", style_subtitle))
     story.append(HRFlowable(width="100%", thickness=1.5, color=c(NAVY), spaceAfter=10))
 
+    def md(text: str) -> str:
+        """Escape HTML then convert inline markdown to ReportLab XML tags."""
+        import re as _re
+        text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        text = _re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+        text = _re.sub(r'__(.+?)__',     r'<b>\1</b>', text)
+        text = _re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<i>\1</i>', text)
+        return text
+
     in_email_block = False
     email_lines    = []
 
@@ -824,33 +833,28 @@ def generate_pdf(notes_md: str, output_path: Path, meeting_date: str, topic: str
                 flush_email()
                 story.append(Paragraph(line[3:], style_h2))
             else:
-                email_lines.append(line if line else "&nbsp;")
+                email_lines.append(md(line) if line else "&nbsp;")
             continue
 
         if line.startswith("## "):
-            story.append(Paragraph(line[3:], style_h2))
+            story.append(Paragraph(md(line[3:]), style_h2))
         elif line.startswith("### "):
-            story.append(Paragraph(line[4:], style_h3))
+            story.append(Paragraph(md(line[4:]), style_h3))
         elif line.startswith("- [ ] ") or line.startswith("- [x] "):
             checked = line.startswith("- [x] ")
             box  = "☑" if checked else "☐"
-            text = line[6:].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            story.append(Paragraph(f"{box}  {text}", style_bullet))
+            story.append(Paragraph(f"{box}  {md(line[6:])}", style_bullet))
         elif line.startswith("- "):
-            text = line[2:].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            story.append(Paragraph(f"•  {text}", style_bullet))
+            story.append(Paragraph(f"•  {md(line[2:])}", style_bullet))
         elif line.startswith("> "):
-            text = line[2:].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            story.append(Paragraph(f'<i>"{text}"</i>', style_body))
+            story.append(Paragraph(f'<i>"{md(line[2:])}"</i>', style_body))
         elif line.startswith('"') and line.endswith('"'):
-            text = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            story.append(Paragraph(f"<i>{text}</i>", style_body))
+            story.append(Paragraph(f"<i>{md(line)}</i>", style_body))
         elif line in ("", "---"):
             story.append(Spacer(1, 4))
         else:
             if line:
-                text = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                story.append(Paragraph(text, style_body))
+                story.append(Paragraph(md(line), style_body))
 
     if in_email_block:
         flush_email()
