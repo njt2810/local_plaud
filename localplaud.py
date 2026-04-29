@@ -459,28 +459,40 @@ def _render_excerpt(excerpt: list[dict], speaker_color: dict) -> Text:
 def diarize(audio_path: Path, segments: list[dict]) -> tuple[list[dict], int]:
     print_section("SPEAKER ID", 4, 7)
 
-    from pyannote.audio import Pipeline
-    import torchaudio
+    import os, sys
     import torch
+    import torchaudio
+
+    # PyTorch 2.6 changed weights_only default to True, breaking pyannote checkpoints.
+    # The official override env var (checked at call time by torch.serialization.load).
+    os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
+
+    # ── Patch: huggingface_hub use_auth_token → token ───────────────────────
+    # pyannote 3.3.x passes use_auth_token= internally; newer huggingface_hub
+    # removed that parameter. Patch hf_hub_download BEFORE importing pyannote.
+    import huggingface_hub as _hf
+    import huggingface_hub.file_download as _hfd
+    _orig_dl = _hfd.hf_hub_download
+    if not getattr(_orig_dl, "_lp_patched", False):
+        def _compat_dl(*a, use_auth_token=None, **kw):
+            if use_auth_token is not None and "token" not in kw:
+                kw["token"] = use_auth_token
+            return _orig_dl(*a, **kw)
+        _compat_dl._lp_patched = True
+        _hfd.hf_hub_download = _compat_dl
+        _hf.hf_hub_download = _compat_dl
+
+    # ── Import pyannote AFTER both patches are applied ───────────────────────
+    from pyannote.audio import Pipeline
+    # Sweep any module-level bindings pyannote created during its import
+    for _mod in list(sys.modules.values()):
+        try:
+            if getattr(_mod, "hf_hub_download", None) is _orig_dl:
+                _mod.hf_hub_download = _compat_dl
+        except Exception:
+            pass
 
     with Spinner("Loading pyannote speaker model  (first run ~1 GB download)"):
-        # pyannote 3.3.x still passes use_auth_token= to hf_hub_download internally,
-        # but newer huggingface_hub removed that parameter. Patch it before loading
-        # pyannote so old calls are forwarded to token= transparently.
-        import huggingface_hub as _hfhub
-        if not getattr(_hfhub.hf_hub_download, "_lp_patched", False):
-            _orig_dl = _hfhub.hf_hub_download
-            def _compat_dl(*a, use_auth_token=None, **kw):
-                if use_auth_token is not None and "token" not in kw:
-                    kw["token"] = use_auth_token
-                return _orig_dl(*a, **kw)
-            _compat_dl._lp_patched = True
-            _hfhub.hf_hub_download = _compat_dl
-            try:
-                import huggingface_hub.file_download as _hfd
-                _hfd.hf_hub_download = _compat_dl
-            except Exception:
-                pass
         pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1")
 
     try:
