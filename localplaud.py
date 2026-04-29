@@ -464,8 +464,23 @@ def diarize(audio_path: Path, segments: list[dict]) -> tuple[list[dict], int]:
     import torch
 
     with Spinner("Loading pyannote speaker model  (first run ~1 GB download)"):
-        from huggingface_hub import login as _hf_login
-        _hf_login(token=HF_TOKEN, add_to_git_credential=False)
+        # pyannote 3.3.x still passes use_auth_token= to hf_hub_download internally,
+        # but newer huggingface_hub removed that parameter. Patch it before loading
+        # pyannote so old calls are forwarded to token= transparently.
+        import huggingface_hub as _hfhub
+        if not getattr(_hfhub.hf_hub_download, "_lp_patched", False):
+            _orig_dl = _hfhub.hf_hub_download
+            def _compat_dl(*a, use_auth_token=None, **kw):
+                if use_auth_token is not None and "token" not in kw:
+                    kw["token"] = use_auth_token
+                return _orig_dl(*a, **kw)
+            _compat_dl._lp_patched = True
+            _hfhub.hf_hub_download = _compat_dl
+            try:
+                import huggingface_hub.file_download as _hfd
+                _hfd.hf_hub_download = _compat_dl
+            except Exception:
+                pass
         pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1")
 
     try:
