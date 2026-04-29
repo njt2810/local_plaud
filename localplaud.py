@@ -11,12 +11,7 @@ import shutil
 import re
 import datetime
 import traceback
-import threading
 from pathlib import Path
-
-# Enable ANSI colour codes on Windows
-if sys.platform == "win32":
-    os.system("")
 
 # ---------------------------------------------------------------------------
 # Bootstrap: load .env before anything else
@@ -26,6 +21,25 @@ try:
     load_dotenv(Path(__file__).parent / ".env")
 except ImportError:
     pass
+
+# ---------------------------------------------------------------------------
+# Rich + InquirerPy
+# ---------------------------------------------------------------------------
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+from rich.text import Text
+from rich import box as rbox
+
+console = Console()
+
+try:
+    from InquirerPy import inquirer
+    from InquirerPy.base.control import Choice
+    _INQUIRER = True
+except ImportError:
+    _INQUIRER = False
 
 # ---------------------------------------------------------------------------
 # Settings
@@ -52,140 +66,114 @@ HAIKU_COST_OUT  = 4.00  / 1_000_000
 SONNET_COST_IN  = 3.00  / 1_000_000
 SONNET_COST_OUT = 15.00 / 1_000_000
 
+SPEAKER_COLORS = ["cyan", "yellow", "magenta", "green", "blue", "red"]
+
 # ---------------------------------------------------------------------------
-# Colour / terminal system
+# UI helpers
 # ---------------------------------------------------------------------------
-IS_TTY = sys.stdout.isatty()
-
-class C:
-    BLUE    = "\033[94m"  if IS_TTY else ""
-    CYAN    = "\033[96m"  if IS_TTY else ""
-    WHITE   = "\033[97m"  if IS_TTY else ""
-    DIM     = "\033[2m"   if IS_TTY else ""
-    GREEN   = "\033[92m"  if IS_TTY else ""
-    RED     = "\033[91m"  if IS_TTY else ""
-    YELLOW  = "\033[93m"  if IS_TTY else ""
-    MAGENTA = "\033[95m"  if IS_TTY else ""
-    BOLD    = "\033[1m"   if IS_TTY else ""
-    RESET   = "\033[0m"   if IS_TTY else ""
-
-# Palette assigned to speakers in order
-SPEAKER_PALETTE = [C.CYAN, C.YELLOW, C.MAGENTA, C.GREEN, C.BLUE + C.BOLD, C.RED]
-
-def tw() -> int:
-    """Terminal width, clamped to sensible range."""
-    try:
-        return min(max(os.get_terminal_size().columns, 60), 120)
-    except Exception:
-        return 72
-
-def hr(char: str = "─", color: str = "") -> str:
-    return color + char * (tw() - 2) + C.RESET
-
 def print_ok(msg: str):
-    print(f"  {C.GREEN}[OK]{C.RESET}   {msg}")
+    console.print(f"  [green]✓[/green]  {msg}")
 
 def print_err(msg: str):
-    print(f"  {C.RED}[ERR]{C.RESET}  {msg}")
+    console.print(f"  [bold red]✗[/bold red]  {msg}")
 
 def print_warn(msg: str):
-    print(f"  {C.YELLOW}[WARN]{C.RESET} {msg}")
+    console.print(f"  [yellow]⚠[/yellow]  {msg}")
 
 def print_info(msg: str):
-    print(f"  {C.DIM}[INFO]{C.RESET} {msg}")
+    console.print(f"  [dim]{msg}[/dim]")
 
 def print_section(title: str, step: int = 0, total: int = 0):
-    print()
-    w = tw()
+    console.print()
     if step and total:
-        left  = f"  {C.DIM}──{C.RESET} {C.BOLD}{C.CYAN}[ {step:02d} / {total:02d} ]  {title}{C.RESET} "
-        vlen  = len(f"  ── [ {step:02d} / {total:02d} ]  {title} ")
+        console.rule(f"[bold cyan][ {step:02d} / {total:02d} ]  {title}[/bold cyan]", style="dim blue")
     else:
-        left  = f"  {C.BOLD}{C.CYAN}{title}{C.RESET} "
-        vlen  = len(f"  {title} ")
-    rule_len = max(w - vlen - 2, 4)
-    print(left + C.DIM + "─" * rule_len + C.RESET)
-    print()
+        console.rule(f"[bold cyan]{title}[/bold cyan]", style="dim blue")
+    console.print()
 
-def make_progress_bar(current: float, total: float, width: int = 24) -> str:
-    pct    = min(1.0, current / total) if total > 0 else 0
-    filled = int(width * pct)
-    bar    = "█" * filled + "░" * (width - filled)
-    return f"{C.BLUE}[{bar}]{C.RESET} {C.WHITE}{pct*100:5.1f}%{C.RESET}"
-
-# ---------------------------------------------------------------------------
-# Spinner
-# ---------------------------------------------------------------------------
 class Spinner:
-    FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-
     def __init__(self, message: str):
-        self.message  = message
-        self._stop    = threading.Event()
-        self._thread  = None
-        self._start   = None
-
-    def _run(self):
-        i = 0
-        while not self._stop.is_set():
-            elapsed = time.time() - self._start
-            frame   = self.FRAMES[i % len(self.FRAMES)]
-            line    = f"  {C.CYAN}{frame}{C.RESET}  {self.message}  {C.DIM}({elapsed:.0f}s){C.RESET}"
-            print(f"\r{line:<{tw()}}", end="", flush=True)
-            i += 1
-            time.sleep(0.1)
+        self._ctx = console.status(f"[cyan]{message}[/cyan]", spinner="dots")
 
     def __enter__(self):
-        if not IS_TTY:
-            print(f"  {self.message}...")
-            return self
-        self._start  = time.time()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
+        self._ctx.__enter__()
         return self
 
     def __exit__(self, *args):
-        self._stop.set()
-        if self._thread:
-            self._thread.join()
-        if IS_TTY:
-            print(f"\r{' ' * tw()}\r", end="", flush=True)
-
-# ---------------------------------------------------------------------------
-# Startup animation
-# ---------------------------------------------------------------------------
-LOGO_LINES = [
-    " _                    _ ____  _                 _",
-    "| |    ___   ___ __ _| |  _ \\| | __ _ _   _  __| |",
-    "| |   / _ \\ / __/ _` | |_) | |/ _` | | | |/ _` |",
-    "| |__| (_) | (_| (_| |  __/| | (_| | |_| | (_| |",
-    "|_____\\___/ \\___\\__,_|_|   |_|\\__,_|\\__,_|\\__,_|",
-]
+        self._ctx.__exit__(*args)
 
 def startup_animation():
-    print()
-    for line in LOGO_LINES:
-        print(f"  {C.BLUE}{C.BOLD}", end="", flush=True)
-        if IS_TTY:
-            for ch in line:
-                print(ch, end="", flush=True)
-                time.sleep(0.004)
-        else:
-            print(line, end="")
-        print(C.RESET)
+    console.print()
+    console.print(Panel(
+        "[dim]Private Meeting Notes  ·  Audio stays local[/dim]",
+        title="[bold blue]LOCALPLAUD[/bold blue]",
+        border_style="blue",
+        padding=(0, 2),
+    ))
+    console.print()
 
-    print()
-    tagline = "  Private Meeting Notes  ·  Audio stays local"
-    if IS_TTY:
-        print(C.DIM, end="")
-        for ch in tagline:
-            print(ch, end="", flush=True)
-            time.sleep(0.012)
-        print(C.RESET)
-    else:
-        print(tagline)
-    print()
-    time.sleep(0.15)
+# ---------------------------------------------------------------------------
+# Interactive prompts
+# ---------------------------------------------------------------------------
+def ask_text(prompt: str, default: str = "") -> str:
+    if _INQUIRER:
+        try:
+            result = inquirer.text(message=prompt, default=default).execute()
+            return (result or "").strip()
+        except (KeyboardInterrupt, EOFError):
+            return ""
+        except Exception:
+            pass
+    try:
+        return input(f"  ? {prompt} ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return ""
+
+def ask_confirm(prompt: str, default: bool = False) -> bool:
+    if _INQUIRER:
+        try:
+            return inquirer.confirm(message=prompt, default=default).execute()
+        except (KeyboardInterrupt, EOFError):
+            return default
+        except Exception:
+            pass
+    hint = "(Y/n)" if default else "(y/N)"
+    try:
+        val = input(f"  ? {prompt} {hint} ").strip().upper()
+        return (val == "Y") if val else default
+    except (EOFError, KeyboardInterrupt):
+        return default
+
+def ask_select(prompt: str, choices: list, default_index: int = 0) -> str | None:
+    if _INQUIRER:
+        try:
+            return inquirer.select(
+                message=prompt,
+                choices=choices,
+                default=choices[default_index] if choices else None,
+            ).execute()
+        except (KeyboardInterrupt, EOFError):
+            return None
+        except Exception:
+            pass
+    console.print()
+    for i, ch in enumerate(choices, 1):
+        label = ch.name if hasattr(ch, "name") else str(ch)
+        console.print(f"  [cyan][{i}][/cyan]  {label}")
+    console.print()
+    try:
+        val = input(f"  ? {prompt} ").strip()
+        if val.isdigit() and 1 <= int(val) <= len(choices):
+            ch = choices[int(val) - 1]
+            return ch.value if hasattr(ch, "value") else ch
+    except (EOFError, KeyboardInterrupt):
+        pass
+    return None
+
+def safe_input(prompt: str, buffer: bool = False) -> str:
+    if buffer:
+        time.sleep(0.1)
+    return ask_text(prompt)
 
 # ---------------------------------------------------------------------------
 # Ensure folders exist
@@ -194,12 +182,12 @@ for _d in [DIR_NOT_TRANSCRIBED, DIR_COMPLETED, DIR_MARKDOWN, DIR_PDF, DIR_STATE]
     _d.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
-# Logging helpers
+# Logging
 # ---------------------------------------------------------------------------
 def log(msg: str):
     ts   = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     line = f"[{ts}] {msg}"
-    print(f"  {C.DIM}{line}{C.RESET}")
+    console.print(f"  [dim]{line}[/dim]")
     try:
         with open(FILE_LOG, "a", encoding="utf-8") as f:
             f.write(line + "\n")
@@ -224,13 +212,12 @@ def log_error(event: str, error: Exception, extra: dict | None = None):
 def run_doctor() -> int:
     print_section("LOCALPLAUD DOCTOR")
     ok = True
-
     checks = [
         ("Recordings/Not Transcribed", DIR_NOT_TRANSCRIBED),
-        ("Recordings/Completed", DIR_COMPLETED),
-        ("Meeting Minutes/Markdown", DIR_MARKDOWN),
-        ("Meeting Minutes/PDF", DIR_PDF),
-        (".localplaud_state", DIR_STATE),
+        ("Recordings/Completed",       DIR_COMPLETED),
+        ("Meeting Minutes/Markdown",   DIR_MARKDOWN),
+        ("Meeting Minutes/PDF",        DIR_PDF),
+        (".localplaud_state",          DIR_STATE),
     ]
     for label, path in checks:
         try:
@@ -250,20 +237,14 @@ def run_doctor() -> int:
         ok = False
         print_err("ANTHROPIC_API_KEY is missing")
 
-    print_info(f"Whisper model configured: {WHISPER_MODEL}")
-    print_info(f"Claude model configured: {CLAUDE_MODEL}")
+    print_info(f"Whisper model: {WHISPER_MODEL}")
+    print_info(f"Claude model:  {CLAUDE_MODEL}")
     if HF_TOKEN:
         print_ok("HF_TOKEN is set (speaker ID enabled)")
     else:
-        print_warn("HF_TOKEN is missing (speaker ID disabled)")
+        print_warn("HF_TOKEN missing (speaker ID disabled)")
 
-    libs = [
-        "faster_whisper",
-        "anthropic",
-        "reportlab",
-        "dotenv",
-    ]
-    for lib in libs:
+    for lib in ["faster_whisper", "anthropic", "reportlab", "dotenv"]:
         try:
             __import__(lib)
             print_ok(f"Import OK: {lib}")
@@ -272,22 +253,12 @@ def run_doctor() -> int:
             print_err(f"Import failed: {lib} ({e})")
             log_error("doctor_import_failed", e, {"module": lib})
 
-    print()
+    console.print()
     if ok:
         print_ok("Doctor checks passed.")
         return 0
     print_warn("Doctor found issues. Fix above items and retry.")
     return 1
-
-def safe_input(prompt: str, buffer: bool = False) -> str:
-    """input() with optional pre-sleep to absorb leftover newlines."""
-    if buffer:
-        time.sleep(0.3)
-        print()
-    try:
-        return input(f"  {C.YELLOW}{prompt}{C.RESET} ").strip()
-    except (EOFError, KeyboardInterrupt):
-        return ""
 
 # ---------------------------------------------------------------------------
 # Checkpoint / resume
@@ -296,8 +267,7 @@ def state_path(stem: str) -> Path:
     return DIR_STATE / f"{stem}.json"
 
 def save_state(stem: str, state: dict):
-    p = state_path(stem)
-    with open(p, "w", encoding="utf-8") as f:
+    with open(state_path(stem), "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 def load_state(stem: str) -> dict | None:
@@ -332,12 +302,11 @@ def tx_archive_path(stem: str) -> Path:
 
 def save_tx_archive(stem: str, state: dict):
     """Permanent transcript archive — survives completion, enables reprocess from any step."""
-    p = tx_archive_path(stem)
     archive = {k: state[k] for k in (
         "audio_filename", "meeting_date", "audio_duration",
         "transcript", "user_context", "continuation",
     )}
-    with open(p, "w", encoding="utf-8") as f:
+    with open(tx_archive_path(stem), "w", encoding="utf-8") as f:
         json.dump(archive, f, ensure_ascii=False, indent=2)
 
 def list_tx_archives() -> list[dict]:
@@ -347,7 +316,7 @@ def list_tx_archives() -> list[dict]:
             with open(p, "r", encoding="utf-8") as f:
                 a = json.load(f)
             a["_archive_file"] = str(p)
-            a["_stem"] = p.stem[:-3]  # strip _tx suffix
+            a["_stem"] = p.stem[:-3]
             archives.append(a)
         except Exception:
             pass
@@ -357,16 +326,7 @@ def list_tx_archives() -> list[dict]:
 # File utilities
 # ---------------------------------------------------------------------------
 def list_audio_files(folder: Path) -> list[Path]:
-    files = []
-    for p in sorted(folder.iterdir()):
-        if p.is_file() and p.suffix.lower() in AUDIO_EXTENSIONS:
-            files.append(p)
-    return files
-
-def file_info(p: Path) -> str:
-    size_mb = p.stat().st_size / (1024 * 1024)
-    mtime   = datetime.datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-    return f"{p.name}  {C.DIM}({size_mb:.1f} MB  ·  {mtime}){C.RESET}"
+    return [p for p in sorted(folder.iterdir()) if p.is_file() and p.suffix.lower() in AUDIO_EXTENSIONS]
 
 def safe_move(src: Path, dst_dir: Path) -> Path:
     dst = dst_dir / src.name
@@ -395,20 +355,16 @@ def detect_date(audio_path: Path) -> str:
     for pattern in DATE_PATTERNS:
         m = re.search(pattern, audio_path.stem)
         if m:
-            y, mo, d = m.group(1), m.group(2), m.group(3)
             try:
-                dt = datetime.date(int(y), int(mo), int(d))
-                return dt.strftime("%Y-%m-%d")
+                return datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3))).strftime("%Y-%m-%d")
             except ValueError:
                 pass
-    mtime = datetime.datetime.fromtimestamp(audio_path.stat().st_mtime)
-    return mtime.strftime("%Y-%m-%d")
+    return datetime.datetime.fromtimestamp(audio_path.stat().st_mtime).strftime("%Y-%m-%d")
 
 # ---------------------------------------------------------------------------
 # Transcription
 # ---------------------------------------------------------------------------
 def transcribe(audio_path: Path) -> tuple[list[dict], float]:
-    """Returns (segments, audio_duration_seconds)."""
     print_section("TRANSCRIBE", 3, 7)
 
     try:
@@ -418,16 +374,16 @@ def transcribe(audio_path: Path) -> tuple[list[dict], float]:
         device = "cpu"
     compute_type = "float16" if device == "cuda" else "int8"
 
-    print_info(f"Model: {C.WHITE}{WHISPER_MODEL}{C.RESET}  ·  Device: {C.WHITE}{device.upper()} / {compute_type}{C.RESET}")
-    print_info(f"File:  {C.WHITE}{audio_path.name}{C.RESET}")
-    print()
+    print_info(f"Model: [white]{WHISPER_MODEL}[/white]  ·  Device: [white]{device.upper()} / {compute_type}[/white]")
+    print_info(f"File:  [white]{audio_path.name}[/white]")
+    console.print()
 
     from faster_whisper import WhisperModel
 
     with Spinner("Loading Whisper model"):
         model = WhisperModel(WHISPER_MODEL, device=device, compute_type=compute_type)
     print_ok("Whisper model loaded")
-    print()
+    console.print()
 
     segments_iter, info = model.transcribe(
         str(audio_path),
@@ -435,95 +391,72 @@ def transcribe(audio_path: Path) -> tuple[list[dict], float]:
         vad_parameters={"min_silence_duration_ms": 500},
     )
     duration = info.duration
-    print_info(f"Duration: {C.WHITE}{duration/60:.1f} min{C.RESET}  ·  Language: {C.WHITE}{info.language}{C.RESET}")
-    print()
+    print_info(f"Duration: [white]{duration/60:.1f} min[/white]  ·  Language: [white]{info.language}[/white]")
+    console.print()
 
     segments_out = []
-    count        = 0
+    count = 0
 
-    if IS_TTY:
-        # Reserve 2 lines for live display
-        print(f"  {C.DIM}Waiting for first segment...{C.RESET}")
-        print()
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[dim]{task.fields[snippet]}[/dim]", no_wrap=True),
+        BarColumn(bar_width=28),
+        TextColumn("[cyan]{task.percentage:>3.0f}%[/cyan]"),
+        TextColumn("[dim]{task.fields[time_str]}[/dim]"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("", total=duration, snippet="Waiting for first segment...", time_str="")
+        for seg in segments_iter:
+            segments_out.append({"start": round(seg.start, 2), "end": round(seg.end, 2), "text": seg.text.strip()})
+            count += 1
+            snip = seg.text.strip()
+            if len(snip) > 55:
+                snip = snip[:54] + "…"
+            progress.update(task, completed=seg.end, snippet=f"› {snip}",
+                            time_str=f"{seg.end/60:.1f}/{duration/60:.1f}min · {count}seg")
 
-    for seg in segments_iter:
-        segments_out.append({
-            "start": round(seg.start, 2),
-            "end":   round(seg.end,   2),
-            "text":  seg.text.strip(),
-        })
-        count += 1
-
-        if IS_TTY:
-            pb       = make_progress_bar(seg.end, duration, 26)
-            t_str    = f"{seg.end/60:.1f} / {duration/60:.1f} min  ·  {count} seg"
-            text_snip = seg.text.strip()
-            max_text  = tw() - 8
-            if len(text_snip) > max_text:
-                text_snip = text_snip[:max_text - 1] + "…"
-            text_line = f"  {C.DIM}› {text_snip}{C.RESET}"
-            prog_line = f"  {pb}  {C.DIM}{t_str}{C.RESET}"
-            # Move up 2 lines and overwrite
-            sys.stdout.write(f"\033[2A\033[2K{text_line}\n\033[2K{prog_line}\n")
-            sys.stdout.flush()
-        elif count % 50 == 0:
-            print(f"  ... {count} segments  ·  {seg.end:.0f}s processed")
-
-    if IS_TTY:
-        print()  # clear past the progress block
-
-    print()
-    print_ok(f"Transcription complete  ·  {C.WHITE}{count} segments{C.RESET}  ·  {C.WHITE}{duration/60:.1f} min{C.RESET}")
+    console.print()
+    print_ok(f"Transcription complete  ·  [white]{count} segments[/white]  ·  [white]{duration/60:.1f} min[/white]")
     return segments_out, duration
 
 # ---------------------------------------------------------------------------
 # Diarization helpers
 # ---------------------------------------------------------------------------
 def _find_contextual_excerpt(labelled: list[dict], target: str, window: int = 14) -> list[dict]:
-    """Return the segment window where target speaker appears with the most OTHER named speakers."""
     UNNAMED = re.compile(r"^SPEAKER_\d+$", re.IGNORECASE)
     appearances = [i for i, s in enumerate(labelled) if s["speaker"] == target]
     if not appearances:
         return []
-
-    best_start = max(0, appearances[0] - window // 2)
-    best_score = -1
-
+    best_start, best_score = max(0, appearances[0] - window // 2), -1
     for idx in appearances:
         start = max(0, idx - window // 2)
         end   = min(len(labelled), start + window)
-        named_others = {
-            s["speaker"] for s in labelled[start:end]
-            if s["speaker"] != target and not UNNAMED.match(s["speaker"])
-        }
-        if len(named_others) > best_score:
-            best_score = len(named_others)
-            best_start = start
-
+        score = len({s["speaker"] for s in labelled[start:end] if s["speaker"] != target and not UNNAMED.match(s["speaker"])})
+        if score > best_score:
+            best_score, best_start = score, start
     return labelled[best_start : min(len(labelled), best_start + window)]
 
-def _show_excerpt(excerpt: list[dict], speaker_color: dict, w: int):
-    """Print a coloured chat-style excerpt block."""
+def _render_excerpt(excerpt: list[dict], speaker_color: dict) -> Text:
+    text = Text()
     prev_s = None
     for seg in excerpt:
         s_name = seg["speaker"]
-        s_col  = speaker_color.get(s_name, C.WHITE)
-        ts     = f"{C.DIM}[{int(seg['start']//60):02d}:{int(seg['start']%60):02d}]{C.RESET}"
-        text   = seg["text"]
-        max_t  = w - 26
-        if len(text) > max_t:
-            text = text[:max_t - 1] + "…"
+        color  = speaker_color.get(s_name, "white")
+        ts     = f"[{int(seg['start']//60):02d}:{int(seg['start']%60):02d}]"
         if s_name != prev_s:
-            print()
-            print(f"  {ts}  {s_col}{C.BOLD}{s_name:<14}{C.RESET}")
+            text.append("\n")
+            text.append(f"  {ts}  ", style="dim")
+            text.append(f"{s_name}\n", style=f"bold {color}")
             prev_s = s_name
-        print(f"  {'':18}  {text}")
+        text.append(f"                    {seg['text']}\n")
+    return text
 
 # ---------------------------------------------------------------------------
 # Diarization
 # ---------------------------------------------------------------------------
 def diarize(audio_path: Path, segments: list[dict]) -> tuple[list[dict], int]:
-    """Returns (labelled_segments, speaker_count)."""
     print_section("SPEAKER ID", 4, 7)
 
     from pyannote.audio import Pipeline
@@ -531,10 +464,7 @@ def diarize(audio_path: Path, segments: list[dict]) -> tuple[list[dict], int]:
     import torch
 
     with Spinner("Loading pyannote speaker model  (first run ~1 GB download)"):
-        pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            token=HF_TOKEN,
-        )
+        pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=HF_TOKEN)
 
     try:
         if torch.cuda.is_available():
@@ -543,7 +473,7 @@ def diarize(audio_path: Path, segments: list[dict]) -> tuple[list[dict], int]:
         pass
 
     print_ok("Speaker model loaded")
-    print()
+    console.print()
 
     with Spinner("Loading audio waveform"):
         try:
@@ -562,12 +492,11 @@ def diarize(audio_path: Path, segments: list[dict]) -> tuple[list[dict], int]:
             _arr = _np.concatenate(_chunks, axis=1).astype(_np.float32) if _chunks else _np.zeros((1, 0), dtype=_np.float32)
             waveform = torch.from_numpy(_arr)
     print_ok("Waveform loaded")
-    print()
+    console.print()
 
     with Spinner("Running diarization"):
         diarization = pipeline({"waveform": waveform, "sample_rate": sample_rate})
 
-    # Build speaker turns — unwrap DiarizeOutput if newer pyannote version
     annotation = diarization.diarization if hasattr(diarization, "diarization") else diarization
     turns = []
     for turn, _, speaker in annotation.itertracks(yield_label=True):
@@ -578,118 +507,82 @@ def diarize(audio_path: Path, segments: list[dict]) -> tuple[list[dict], int]:
         for t in turns:
             overlap = min(seg_end, t["end"]) - max(seg_start, t["start"])
             if overlap > best_overlap:
-                best_overlap = overlap
-                best = t["speaker"]
+                best_overlap, best = overlap, t["speaker"]
         return best or "UNKNOWN"
 
-    labelled = [{**seg, "speaker": best_speaker(seg["start"], seg["end"])} for seg in segments]
+    labelled     = [{**seg, "speaker": best_speaker(seg["start"], seg["end"])} for seg in segments]
+    all_speakers = sorted({s["speaker"] for s in labelled})
+    speaker_color = {spk: SPEAKER_COLORS[i % len(SPEAKER_COLORS)] for i, spk in enumerate(all_speakers)}
 
-    all_speakers   = sorted({s["speaker"] for s in labelled})
-    speaker_color  = {spk: SPEAKER_PALETTE[i % len(SPEAKER_PALETTE)] for i, spk in enumerate(all_speakers)}
+    spk_tags = "  ".join(f"[{speaker_color[s]}]{s}[/]" for s in all_speakers)
+    print_ok(f"Detected [white]{len(all_speakers)} speaker(s)[/white]: {spk_tags}")
+    console.print()
 
-    print_ok(f"Detected {C.WHITE}{len(all_speakers)} speaker(s){C.RESET}: "
-             + "  ".join(f"{speaker_color[s]}{s}{C.RESET}" for s in all_speakers))
-    print()
+    mid = len(labelled) // 2
+    excerpt = labelled[max(0, mid - 15) : min(len(labelled), mid + 15)]
+    console.print(Panel(
+        _render_excerpt(excerpt, speaker_color),
+        title="[bold cyan]TRANSCRIPT EXCERPT[/bold cyan]",
+        subtitle="[dim]middle of recording — all speakers shown[/dim]",
+        border_style="dim",
+        padding=(0, 1),
+    ))
+    console.print()
 
-    # --- Show 30-segment excerpt from middle of recording ---
-    w         = tw()
-    mid_idx   = len(labelled) // 2
-    start_idx = max(0, mid_idx - 15)
-    end_idx   = min(len(labelled), mid_idx + 15)
-    excerpt   = labelled[start_idx:end_idx]
-
-    print(f"  {C.DIM}┌{'─' * (w - 6)}┐{C.RESET}")
-    print(f"  {C.DIM}│{C.RESET}  {C.BOLD}{C.CYAN}TRANSCRIPT EXCERPT{C.RESET}  {C.DIM}(middle of recording — all speakers shown){C.RESET}")
-    print(f"  {C.DIM}└{'─' * (w - 6)}┘{C.RESET}")
-    print()
-
-    prev_speaker = None
-    for seg in excerpt:
-        spk   = seg["speaker"]
-        color = speaker_color.get(spk, C.WHITE)
-        ts    = f"{C.DIM}[{int(seg['start']//60):02d}:{int(seg['start']%60):02d}]{C.RESET}"
-        text  = seg["text"]
-        max_t = w - 26
-        if len(text) > max_t:
-            text = text[:max_t - 1] + "…"
-        if spk != prev_speaker:
-            print()
-            print(f"  {ts}  {color}{C.BOLD}{spk:<14}{C.RESET}")
-            prev_speaker = spk
-        print(f"  {'':18}  {text}")
-
-    print()
-    print(f"  {C.DIM}{'─' * (w - 4)}{C.RESET}")
-    print()
-
-    # --- Round 1: name each speaker from the middle excerpt ---
-    print(f"  {C.BOLD}{C.CYAN}NAME SPEAKERS{C.RESET}  {C.DIM}Press Enter to keep the label as-is{C.RESET}")
-    print()
+    console.print("  [bold cyan]NAME SPEAKERS[/bold cyan]  [dim]Press Enter to keep the label as-is[/dim]")
+    console.print()
 
     name_map = {}
     for spk in all_speakers:
-        color = speaker_color.get(spk, C.WHITE)
-        ans = safe_input(f"Who is {color}{C.BOLD}{spk}{C.RESET}? (Enter to keep):", buffer=True)
+        color = speaker_color.get(spk, "white")
+        console.print(f"  [{color}]▶  {spk}[/]")
+        ans = ask_text("Name this speaker (Enter to keep):")
         name_map[spk] = ans if ans else spk
 
-    # Apply round-1 names
     for seg in labelled:
         seg["speaker"] = name_map.get(seg["speaker"], seg["speaker"])
-
-    # Rebuild color map with new names
     speaker_color = {name_map.get(old, old): col for old, col in speaker_color.items()}
 
-    # --- Round 2: catch speakers still labelled SPEAKER_XX ---
     UNNAMED = re.compile(r"^SPEAKER_\d+$", re.IGNORECASE)
     unidentified = sorted({s["speaker"] for s in labelled if UNNAMED.match(s["speaker"])})
 
     if unidentified:
-        print()
-        print(f"  {C.YELLOW}[INFO]{C.RESET}  {len(unidentified)} speaker(s) still unidentified.")
-        print(f"  {C.DIM}Showing contextual excerpts — each unidentified speaker alongside people you've already named.{C.RESET}")
+        console.print()
+        print_info(f"{len(unidentified)} speaker(s) still unidentified.")
+        print_info("Showing contextual excerpts — each alongside people you've already named.")
 
         for spk in unidentified:
-            color   = speaker_color.get(spk, C.MAGENTA)
-            excerpt = _find_contextual_excerpt(labelled, spk, window=14)
-            w       = tw()
-
-            print()
-            print(f"  {C.YELLOW}┌{'─' * (w - 6)}┐{C.RESET}")
-            print(f"  {C.YELLOW}│{C.RESET}  {C.BOLD}{C.YELLOW}UNIDENTIFIED:{C.RESET}  {color}{C.BOLD}{spk}{C.RESET}")
-            print(f"  {C.YELLOW}└{'─' * (w - 6)}┘{C.RESET}")
-            print()
-
-            _show_excerpt(excerpt, speaker_color, w)
-
-            print()
-            print(f"  {C.DIM}{'─' * (w - 4)}{C.RESET}")
-            print()
-
-            ans      = safe_input(f"Who is {color}{C.BOLD}{spk}{C.RESET}? (Enter to keep as '{spk}'):", buffer=True)
+            color   = speaker_color.get(spk, "magenta")
+            ctx     = _find_contextual_excerpt(labelled, spk, window=14)
+            console.print()
+            console.print(Panel(
+                _render_excerpt(ctx, speaker_color),
+                title=f"[yellow]UNIDENTIFIED:[/yellow]  [{color}]{spk}[/]",
+                border_style="yellow",
+                padding=(0, 1),
+            ))
+            console.print()
+            console.print(f"  [{color}]▶  {spk}[/]")
+            ans      = ask_text(f"Name this speaker (Enter to keep as '{spk}'):")
             new_name = ans.strip() if ans.strip() else spk
-
             if new_name != spk:
                 for seg in labelled:
                     if seg["speaker"] == spk:
                         seg["speaker"] = new_name
-                old_color = speaker_color.pop(spk, color)
-                speaker_color[new_name] = old_color
-                print_ok(f"{color}{spk}{C.RESET}  →  {C.WHITE}{new_name}{C.RESET}")
+                speaker_color[new_name] = speaker_color.pop(spk, color)
+                print_ok(f"[{color}]{spk}[/]  →  [white]{new_name}[/white]")
 
-    print()
+    console.print()
     final_speakers = sorted({s["speaker"] for s in labelled})
-    print_ok(
-        f"Speaker labels finalised  ·  {C.WHITE}{len(final_speakers)} speaker(s){C.RESET}: "
-        + "  ".join(f"{speaker_color.get(s, C.WHITE)}{s}{C.RESET}" for s in final_speakers)
-    )
+    final_tags = "  ".join(f"[{speaker_color.get(s,'white')}]{s}[/]" for s in final_speakers)
+    print_ok(f"Speaker labels finalised  ·  [white]{len(final_speakers)} speaker(s)[/white]: {final_tags}")
     return labelled, len(final_speakers)
 
 # ---------------------------------------------------------------------------
 # Transcript formatting
 # ---------------------------------------------------------------------------
 def format_transcript(segments: list[dict], has_speakers: bool) -> str:
-    lines        = []
-    prev_speaker = None
+    lines, prev_speaker = [], None
     for seg in segments:
         if not seg.get("text"):
             continue
@@ -798,9 +691,8 @@ def build_prompt(transcript_text: str, has_speakers: bool, user_context: str) ->
     )
 
 def summarise(segments: list[dict], has_speakers: bool, user_context: str) -> tuple[str, str, int, int, float]:
-    """Returns (notes_markdown, topic_slug, token_in, token_out, cost)."""
     print_section("SUMMARISE", 5, 7)
-    print_info(f"Model: {C.WHITE}{CLAUDE_MODEL}{C.RESET}")
+    print_info(f"Model: [white]{CLAUDE_MODEL}[/white]")
 
     import anthropic
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -808,8 +700,8 @@ def summarise(segments: list[dict], has_speakers: bool, user_context: str) -> tu
     transcript_text = format_transcript(segments, has_speakers)
     prompt          = build_prompt(transcript_text, has_speakers, user_context)
 
-    print_info(f"Transcript: {C.WHITE}{len(transcript_text):,} chars{C.RESET}  ·  Prompt: {C.WHITE}{len(prompt):,} chars{C.RESET}")
-    print()
+    print_info(f"Transcript: [white]{len(transcript_text):,} chars[/white]  ·  Prompt: [white]{len(prompt):,} chars[/white]")
+    console.print()
 
     with Spinner("Claude is reading the transcript"):
         message = client.messages.create(
@@ -821,26 +713,16 @@ def summarise(segments: list[dict], has_speakers: bool, user_context: str) -> tu
     response_text = message.content[0].text
     in_tokens     = message.usage.input_tokens
     out_tokens    = message.usage.output_tokens
+    cost = (in_tokens * HAIKU_COST_IN + out_tokens * HAIKU_COST_OUT) if "haiku" in CLAUDE_MODEL \
+           else (in_tokens * SONNET_COST_IN + out_tokens * SONNET_COST_OUT)
 
-    if "haiku" in CLAUDE_MODEL:
-        cost = in_tokens * HAIKU_COST_IN + out_tokens * HAIKU_COST_OUT
-    else:
-        cost = in_tokens * SONNET_COST_IN + out_tokens * SONNET_COST_OUT
+    print_ok(f"Response received  ·  [white]{in_tokens:,} in / {out_tokens:,} out[/white]  ·  [green]~${cost:.4f}[/green]")
 
-    print_ok(f"Response received  ·  "
-             f"{C.WHITE}{in_tokens:,} in / {out_tokens:,} out{C.RESET}  ·  "
-             f"{C.GREEN}~${cost:.4f}{C.RESET}")
-
-    # Extract TOPIC from first line
-    lines      = response_text.strip().splitlines()
-    topic_slug = "Meeting-Notes"
-    notes      = response_text
-
+    lines = response_text.strip().splitlines()
+    topic_slug, notes = "Meeting-Notes", response_text
     if lines and lines[0].upper().startswith("TOPIC:"):
         raw_topic  = lines[0].split(":", 1)[1].strip()
-        topic_slug = re.sub(r"[^a-zA-Z0-9\-]", "", raw_topic.replace(" ", "-"))
-        if not topic_slug:
-            topic_slug = "Meeting-Notes"
+        topic_slug = re.sub(r"[^a-zA-Z0-9\-]", "", raw_topic.replace(" ", "-")) or "Meeting-Notes"
         notes = "\n".join(lines[1:]).strip()
 
     return notes, topic_slug, in_tokens, out_tokens, cost
@@ -856,43 +738,36 @@ DGREY = (80/255,  80/255,  80/255)
 
 def generate_pdf(notes_md: str, output_path: Path, meeting_date: str, topic: str):
     from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.units import mm
-    from reportlab.platypus import (
-        SimpleDocTemplate, Paragraph, Spacer, HRFlowable, Table, TableStyle,
-    )
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable, Table, TableStyle
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER
 
     width, height = A4
     margin = 20 * mm
 
-    doc = SimpleDocTemplate(
-        str(output_path),
-        pagesize=A4,
-        leftMargin=margin, rightMargin=margin,
-        topMargin=margin,  bottomMargin=margin,
-    )
+    doc = SimpleDocTemplate(str(output_path), pagesize=A4,
+                            leftMargin=margin, rightMargin=margin,
+                            topMargin=margin, bottomMargin=margin)
 
     def c(rgb):
         return colors.Color(*rgb)
 
-    style_title    = ParagraphStyle("title",    fontSize=20, leading=26, textColor=c(NAVY), spaceAfter=4,  fontName="Helvetica-Bold")
-    style_subtitle = ParagraphStyle("subtitle", fontSize=11, leading=14, textColor=c(BLUE), spaceAfter=10, fontName="Helvetica")
-    style_h2       = ParagraphStyle("h2",       fontSize=13, leading=17, textColor=c(NAVY), spaceBefore=14, spaceAfter=4, fontName="Helvetica-Bold")
-    style_h3       = ParagraphStyle("h3",       fontSize=11, leading=14, textColor=c(BLUE), spaceBefore=8,  spaceAfter=3, fontName="Helvetica-Bold")
+    style_title    = ParagraphStyle("title",    fontSize=20, leading=26, textColor=c(NAVY), spaceAfter=4,   fontName="Helvetica-Bold")
+    style_subtitle = ParagraphStyle("subtitle", fontSize=11, leading=14, textColor=c(BLUE), spaceAfter=10,  fontName="Helvetica")
+    style_h2       = ParagraphStyle("h2",       fontSize=13, leading=17, textColor=c(NAVY), spaceBefore=14, spaceAfter=4,  fontName="Helvetica-Bold")
+    style_h3       = ParagraphStyle("h3",       fontSize=11, leading=14, textColor=c(BLUE), spaceBefore=8,  spaceAfter=3,  fontName="Helvetica-Bold")
     style_body     = ParagraphStyle("body",     fontSize=10, leading=14, textColor=c(BLACK), spaceAfter=3,  fontName="Helvetica")
     style_bullet   = ParagraphStyle("bullet",   fontSize=10, leading=14, textColor=c(BLACK), spaceAfter=2,  leftIndent=14, fontName="Helvetica")
     style_footer   = ParagraphStyle("footer",   fontSize=8,  leading=10, textColor=c(DGREY), spaceAfter=0,  fontName="Helvetica", alignment=TA_CENTER)
 
     story = []
-
     story.append(Paragraph(topic.replace("-", " "), style_title))
     story.append(Paragraph(f"Meeting Notes  |  {meeting_date}", style_subtitle))
     story.append(HRFlowable(width="100%", thickness=1.5, color=c(NAVY), spaceAfter=10))
 
     def md(text: str) -> str:
-        """Escape HTML then convert inline markdown to ReportLab XML tags."""
         import re as _re
         text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         text = _re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
@@ -900,37 +775,32 @@ def generate_pdf(notes_md: str, output_path: Path, meeting_date: str, topic: str
         text = _re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<i>\1</i>', text)
         return text
 
-    in_email_block = False
-    email_lines    = []
+    in_email_block, email_lines = False, []
 
     def flush_email():
         nonlocal in_email_block, email_lines
         if email_lines:
-            content = "<br/>".join(email_lines)
-            data    = [[Paragraph(content, style_body)]]
-            t       = Table(data, colWidths=[width - 2 * margin])
+            data = [[Paragraph("<br/>".join(email_lines), style_body)]]
+            t    = Table(data, colWidths=[width - 2 * margin])
             t.setStyle(TableStyle([
-                ("BACKGROUND",   (0, 0), (-1, -1), c(LGREY)),
-                ("BOX",          (0, 0), (-1, -1), 0.5, c(BLUE)),
-                ("LEFTPADDING",  (0, 0), (-1, -1), 10),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-                ("TOPPADDING",   (0, 0), (-1, -1), 8),
-                ("BOTTOMPADDING",(0, 0), (-1, -1), 8),
+                ("BACKGROUND",    (0, 0), (-1, -1), c(LGREY)),
+                ("BOX",           (0, 0), (-1, -1), 0.5, c(BLUE)),
+                ("LEFTPADDING",   (0, 0), (-1, -1), 10),
+                ("RIGHTPADDING",  (0, 0), (-1, -1), 10),
+                ("TOPPADDING",    (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
             ]))
             story.append(t)
             story.append(Spacer(1, 8))
-        in_email_block = False
-        email_lines    = []
+        in_email_block, email_lines = False, []
 
     for raw_line in notes_md.splitlines():
         line = raw_line.strip()
-
         if line.startswith("## Follow-Up Email Draft"):
             flush_email()
             story.append(Paragraph("Follow-Up Email Draft", style_h2))
             in_email_block = True
             continue
-
         if in_email_block:
             if line.startswith("## "):
                 flush_email()
@@ -938,15 +808,13 @@ def generate_pdf(notes_md: str, output_path: Path, meeting_date: str, topic: str
             else:
                 email_lines.append(md(line) if line else "&nbsp;")
             continue
-
         if line.startswith("## "):
             story.append(Paragraph(md(line[3:]), style_h2))
         elif line.startswith("### "):
             story.append(Paragraph(md(line[4:]), style_h3))
         elif line.startswith("- [ ] ") or line.startswith("- [x] "):
-            checked = line.startswith("- [x] ")
-            box  = "☑" if checked else "☐"
-            story.append(Paragraph(f"{box}  {md(line[6:])}", style_bullet))
+            box_char = "☑" if line.startswith("- [x] ") else "☐"
+            story.append(Paragraph(f"{box_char}  {md(line[6:])}", style_bullet))
         elif line.startswith("- "):
             story.append(Paragraph(f"•  {md(line[2:])}", style_bullet))
         elif line.startswith("> "):
@@ -955,30 +823,24 @@ def generate_pdf(notes_md: str, output_path: Path, meeting_date: str, topic: str
             story.append(Paragraph(f"<i>{md(line)}</i>", style_body))
         elif line in ("", "---"):
             story.append(Spacer(1, 4))
-        else:
-            if line:
-                story.append(Paragraph(md(line), style_body))
+        elif line:
+            story.append(Paragraph(md(line), style_body))
 
     if in_email_block:
         flush_email()
 
     story.append(Spacer(1, 16))
     story.append(HRFlowable(width="100%", thickness=0.5, color=c(BLUE), spaceAfter=4))
-    gen_ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     story.append(Paragraph(
-        f"Generated by LocalPlaud  |  {gen_ts}  |  Audio stays local — only text sent to Claude",
+        f"Generated by LocalPlaud  |  {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}  |  Audio stays local — only text sent to Claude",
         style_footer,
     ))
-
     doc.build(story)
 
 # ---------------------------------------------------------------------------
 # Completion card
 # ---------------------------------------------------------------------------
 def print_completion_card(state: dict):
-    w     = tw()
-    inner = w - 4
-
     topic    = state.get("topic", "Meeting-Notes")
     date_str = state.get("meeting_date", "")
     dur      = state.get("audio_duration", 0)
@@ -990,29 +852,28 @@ def print_completion_card(state: dict):
     md_path  = state.get("md_path",  "")
     pdf_path = state.get("pdf_path", "")
 
-    title_text = topic.replace("-", " ")
-    dur_str    = f"{dur/60:.0f} min  ·  {segs} segments"
+    dur_str = f"{dur/60:.0f} min  ·  {segs} segments"
     if spks:
         dur_str += f"  ·  {spks} speaker{'s' if spks != 1 else ''}"
 
-    def pad(s: str, visible_len: int) -> str:
-        """Pad to fill inner width, accounting for ANSI codes in s."""
-        spaces = inner - visible_len - 2
-        return s + " " * max(spaces, 0)
-
-    print()
-    print(f"  {C.BLUE}┌{'─' * inner}┐{C.RESET}")
-    row1 = f"  {C.GREEN}[COMPLETE]{C.RESET}  {C.BOLD}{C.WHITE}{title_text}{C.RESET}  {C.DIM}·  {date_str}{C.RESET}"
-    print(f"  {C.BLUE}│{C.RESET}  {row1}")
-    print(f"  {C.BLUE}├{'─' * inner}┤{C.RESET}")
-    print(f"  {C.BLUE}│{C.RESET}  {C.DIM}Audio    {C.RESET}  {dur_str}")
-    print(f"  {C.BLUE}│{C.RESET}  {C.DIM}Tokens   {C.RESET}  {tok_in:,} in  /  {tok_out:,} out  ·  {C.GREEN}~${cost:.4f}{C.RESET}")
+    t = Table(box=None, show_header=False, padding=(0, 1))
+    t.add_column(style="dim", no_wrap=True)
+    t.add_column()
+    t.add_row("Audio",   dur_str)
+    t.add_row("Tokens",  f"{tok_in:,} in / {tok_out:,} out  ·  [green]~${cost:.4f}[/green]")
     if md_path:
-        print(f"  {C.BLUE}│{C.RESET}  {C.DIM}Markdown {C.RESET}  {Path(md_path).name}")
+        t.add_row("Markdown", Path(md_path).name)
     if pdf_path:
-        print(f"  {C.BLUE}│{C.RESET}  {C.DIM}PDF      {C.RESET}  {Path(pdf_path).name}")
-    print(f"  {C.BLUE}└{'─' * inner}┘{C.RESET}")
-    print()
+        t.add_row("PDF",      Path(pdf_path).name)
+
+    console.print()
+    console.print(Panel(
+        t,
+        title=f"[green]✓ COMPLETE[/green]  [bold white]{topic.replace('-', ' ')}[/bold white]  [dim]·  {date_str}[/dim]",
+        border_style="green",
+        padding=(0, 1),
+    ))
+    console.print()
 
 # ---------------------------------------------------------------------------
 # Processing pipeline
@@ -1022,27 +883,25 @@ def process_file(audio_path: Path, state: dict | None = None):
 
     if state is None:
         state = {
-            "current_step":  1,
+            "current_step":   1,
             "audio_filename": audio_path.name,
-            "meeting_date":  None,
-            "transcript":    None,
+            "meeting_date":   None,
+            "transcript":     None,
             "audio_duration": 0,
-            "has_speakers":  False,
-            "speaker_count": 0,
-            "notes":         None,
-            "topic":         None,
-            "token_in":      0,
-            "token_out":     0,
-            "cost":          0.0,
-            "user_context":  "",
-            "continuation":  None,
-            "md_path":       None,
-            "pdf_path":      None,
+            "has_speakers":   False,
+            "speaker_count":  0,
+            "notes":          None,
+            "topic":          None,
+            "token_in":       0,
+            "token_out":      0,
+            "cost":           0.0,
+            "user_context":   "",
+            "continuation":   None,
+            "md_path":        None,
+            "pdf_path":       None,
         }
 
-    # -----------------------------------------------------------------------
     # Step 1: VALIDATE
-    # -----------------------------------------------------------------------
     if state["current_step"] <= 1:
         print_section("VALIDATE", 1, 7)
         if not audio_path.exists():
@@ -1055,16 +914,14 @@ def process_file(audio_path: Path, state: dict | None = None):
         print_ok("API key present")
         state["current_step"] = 2
 
-    # -----------------------------------------------------------------------
     # Step 2: DATE + context
-    # -----------------------------------------------------------------------
     if state["current_step"] <= 2:
         print_section("PREPARE", 2, 7)
 
         if state["meeting_date"] is None:
             date = detect_date(audio_path)
-            print_info(f"Detected date: {C.WHITE}{date}{C.RESET}")
-            confirm = safe_input(f"Use {date}? (Enter to confirm, or type YYYY-MM-DD):", buffer=True)
+            print_info(f"Detected date: [white]{date}[/white]")
+            confirm = ask_text(f"Use {date}? (Enter to confirm, or type YYYY-MM-DD):")
             if confirm:
                 try:
                     datetime.date.fromisoformat(confirm)
@@ -1072,35 +929,28 @@ def process_file(audio_path: Path, state: dict | None = None):
                 except ValueError:
                     print_warn(f"Invalid format — using detected date: {date}")
             state["meeting_date"] = date
-            print_ok(f"Meeting date: {C.WHITE}{state['meeting_date']}{C.RESET}")
+            print_ok(f"Meeting date: [white]{state['meeting_date']}[/white]")
 
         if not state["user_context"]:
-            print()
-            print(f"  {C.DIM}Add one-time context for this meeting (e.g. 'Budget review with Franke Ltd'){C.RESET}")
-            ctx = safe_input("Context (Enter to skip):", buffer=True)
-            state["user_context"] = ctx
+            console.print()
+            print_info("Add one-time context for this meeting (e.g. 'Budget review with Franke Ltd')")
+            state["user_context"] = ask_text("Context (Enter to skip):")
 
-            time.sleep(0.3)
-            print()
-            cont = safe_input("Continuation of a previous recording? (Y/N):").upper()
-            if cont == "Y":
+            console.print()
+            if ask_confirm("Continuation of a previous recording?", default=False):
                 all_audio = list_audio_files(DIR_COMPLETED) + list_audio_files(DIR_NOT_TRANSCRIBED)
                 if all_audio:
-                    print()
-                    for i, f in enumerate(all_audio, 1):
-                        print(f"  {C.CYAN}[{i}]{C.RESET}  {file_info(f)}")
-                    print()
-                    choice = safe_input("Select number (Enter to skip):", buffer=True)
-                    if choice.isdigit() and 1 <= int(choice) <= len(all_audio):
-                        state["continuation"] = str(all_audio[int(choice) - 1])
-                        print_ok(f"Continuation of: {all_audio[int(choice)-1].name}")
+                    choices = [Choice(value=str(f), name=f"{f.name}  ({f.stat().st_size/1024/1024:.1f} MB)") for f in all_audio]
+                    choices.append(Choice(value="", name="Skip"))
+                    picked = ask_select("Select continuation file:", choices=choices)
+                    if picked:
+                        state["continuation"] = picked
+                        print_ok(f"Continuation of: {Path(picked).name}")
 
         state["current_step"] = 3
         save_state(stem, state)
 
-    # -----------------------------------------------------------------------
     # Step 3: TRANSCRIBE
-    # -----------------------------------------------------------------------
     if state["current_step"] <= 3:
         if state["transcript"] is None:
             state["transcript"], state["audio_duration"] = transcribe(audio_path)
@@ -1108,9 +958,7 @@ def process_file(audio_path: Path, state: dict | None = None):
         save_state(stem, state)
         save_tx_archive(stem, state)
 
-    # -----------------------------------------------------------------------
     # Step 4: DIARIZATION
-    # -----------------------------------------------------------------------
     if state["current_step"] <= 4:
         if HF_TOKEN and not state["has_speakers"]:
             try:
@@ -1124,27 +972,18 @@ def process_file(audio_path: Path, state: dict | None = None):
         state["current_step"] = 5
         save_state(stem, state)
 
-    # -----------------------------------------------------------------------
     # Step 5: SUMMARISE
-    # -----------------------------------------------------------------------
     if state["current_step"] <= 5:
         if state["notes"] is None:
             (state["notes"], state["topic"],
              state["token_in"], state["token_out"],
-             state["cost"]) = summarise(
-                state["transcript"],
-                state["has_speakers"],
-                state["user_context"],
-            )
+             state["cost"]) = summarise(state["transcript"], state["has_speakers"], state["user_context"])
         state["current_step"] = 6
         save_state(stem, state)
 
-    # -----------------------------------------------------------------------
     # Step 6: SAVE OUTPUT
-    # -----------------------------------------------------------------------
     if state["current_step"] <= 6:
         print_section("SAVE OUTPUT", 6, 7)
-
         date_str = state["meeting_date"]
         topic    = state["topic"]
         base     = f"{date_str}_Work_MM_{topic}"
@@ -1152,12 +991,12 @@ def process_file(audio_path: Path, state: dict | None = None):
         pdf_path = unique_path(DIR_PDF,      base, ".pdf")
 
         md_path.write_text(state["notes"], encoding="utf-8")
-        print_ok(f"Markdown → {C.WHITE}{md_path.name}{C.RESET}")
+        print_ok(f"Markdown → [white]{md_path.name}[/white]")
 
         try:
             with Spinner("Generating PDF"):
                 generate_pdf(state["notes"], pdf_path, date_str, topic)
-            print_ok(f"PDF      → {C.WHITE}{pdf_path.name}{C.RESET}")
+            print_ok(f"PDF      → [white]{pdf_path.name}[/white]")
             state["pdf_path"] = str(pdf_path)
         except Exception as e:
             print_warn(f"PDF generation failed: {e}")
@@ -1169,12 +1008,9 @@ def process_file(audio_path: Path, state: dict | None = None):
         state["current_step"] = 7
         save_state(stem, state)
 
-    # -----------------------------------------------------------------------
     # Step 7: ORGANISE
-    # -----------------------------------------------------------------------
     if state["current_step"] <= 7:
         print_section("ORGANISE", 7, 7)
-
         if audio_path.exists():
             moved = safe_move(audio_path, DIR_COMPLETED)
             print_ok(f"Audio → Completed/{moved.name}")
@@ -1189,13 +1025,11 @@ def process_file(audio_path: Path, state: dict | None = None):
 
         log(f"Processed: {state['audio_filename']} -> {state.get('topic','?')} ({state['meeting_date']})")
         clear_state(stem)
-
         print_completion_card(state)
 
         pdf_path = state.get("pdf_path")
         if pdf_path and Path(pdf_path).exists():
-            ans = safe_input("Open the PDF? (Y/N):", buffer=True).upper()
-            if ans == "Y":
+            if ask_confirm("Open the PDF?", default=True):
                 try:
                     os.startfile(pdf_path)
                 except Exception as e:
@@ -1204,7 +1038,7 @@ def process_file(audio_path: Path, state: dict | None = None):
                     print_info(f"Path: {pdf_path}")
 
 # ---------------------------------------------------------------------------
-# Menu helpers
+# Menu options
 # ---------------------------------------------------------------------------
 def pick_file_gui() -> Path | None:
     try:
@@ -1213,13 +1047,9 @@ def pick_file_gui() -> Path | None:
         root = tk.Tk()
         root.withdraw()
         root.attributes("-topmost", True)
-        filetypes = [
-            ("Audio files", "*.m4a *.mp3 *.wav *.ogg *.flac *.aac *.wma *.webm"),
-            ("All files",   "*.*"),
-        ]
         path = filedialog.askopenfilename(
             title="Select audio file to transcribe",
-            filetypes=filetypes,
+            filetypes=[("Audio files", "*.m4a *.mp3 *.wav *.ogg *.flac *.aac *.wma *.webm"), ("All files", "*.*")],
         )
         root.destroy()
         return Path(path) if path else None
@@ -1233,7 +1063,7 @@ def option_browse():
     p = pick_file_gui()
     if p is None:
         print_info("No file selected. Enter path manually:")
-        raw = safe_input("Path:", buffer=True)
+        raw = ask_text("Path:")
         if not raw:
             return
         p = Path(raw)
@@ -1248,10 +1078,9 @@ def option_browse():
     completed = DIR_COMPLETED / p.name
     if completed.exists():
         print_warn("This file was previously processed.")
-        ans = safe_input("Reprocess? (Y/N):", buffer=True).upper()
-        if ans != "Y":
+        if not ask_confirm("Reprocess?", default=False):
             return
-        reason = safe_input("Reason for reprocessing:", buffer=True)
+        reason = ask_text("Reason for reprocessing:")
         log(f"Reprocessing: {p.name} | Reason: {reason}")
         shutil.move(str(completed), str(DIR_NOT_TRANSCRIBED / p.name))
         p = DIR_NOT_TRANSCRIBED / p.name
@@ -1262,13 +1091,11 @@ def option_browse():
             print_ok(f"Moved to Not Transcribed: {p.name}")
         p = dst
 
-    stem           = p.stem
-    existing_state = load_state(stem)
+    existing_state = load_state(p.stem)
     if existing_state:
         print_info(f"Checkpoint found at step {existing_state.get('current_step', '?')}.")
-        ans = safe_input("Resume from checkpoint? (Y/N):", buffer=True).upper()
-        if ans != "Y":
-            clear_state(stem)
+        if not ask_confirm("Resume from checkpoint?", default=True):
+            clear_state(p.stem)
             existing_state = None
 
     process_file(p, existing_state)
@@ -1280,23 +1107,25 @@ def option_check_folder():
         print_info(f"No audio files in: {DIR_NOT_TRANSCRIBED}")
         return
 
-    print(f"  {C.DIM}{len(files)} file(s) found{C.RESET}")
-    print()
-    for i, f in enumerate(files, 1):
-        print(f"  {C.CYAN}[{i}]{C.RESET}  {file_info(f)}")
-    print()
+    print_info(f"{len(files)} file(s) found")
+    console.print()
 
-    choice = safe_input("Select file number:", buffer=True)
-    if not choice.isdigit() or not (1 <= int(choice) <= len(files)):
-        print_warn("Invalid selection.")
+    choices = [
+        Choice(
+            value=str(f),
+            name=f"{f.name}  ({f.stat().st_size/1024/1024:.1f} MB  ·  {datetime.datetime.fromtimestamp(f.stat().st_mtime).strftime('%Y-%m-%d %H:%M')})",
+        )
+        for f in files
+    ]
+    picked = ask_select("Select file to process:", choices=choices)
+    if not picked:
         return
 
-    p              = files[int(choice) - 1]
+    p = Path(picked)
     existing_state = load_state(p.stem)
     if existing_state:
         print_info(f"Checkpoint found at step {existing_state.get('current_step', '?')}.")
-        ans = safe_input("Resume from checkpoint? (Y/N):", buffer=True).upper()
-        if ans != "Y":
+        if not ask_confirm("Resume from checkpoint?", default=True):
             clear_state(p.stem)
             existing_state = None
 
@@ -1309,25 +1138,20 @@ def option_batch():
         print_info(f"No audio files in: {DIR_NOT_TRANSCRIBED}")
         return
 
-    print(f"  {C.DIM}{len(files)} file(s) in queue{C.RESET}")
-    print()
+    print_info(f"{len(files)} file(s) in queue")
+    console.print()
 
-    processed = 0
-    skipped   = 0
-
+    processed, skipped = 0, 0
     for f in files:
-        size_mb = f.stat().st_size / (1024 * 1024)
-        print(f"  {C.CYAN}───{C.RESET}  {C.WHITE}{f.name}{C.RESET}  {C.DIM}({size_mb:.1f} MB){C.RESET}")
-        ans = safe_input("Process this file? (Y/N):", buffer=True).upper()
-        if ans != "Y":
+        console.print(f"  [cyan]───[/cyan]  [white]{f.name}[/white]  [dim]({f.stat().st_size/1024/1024:.1f} MB)[/dim]")
+        if not ask_confirm("Process this file?", default=True):
             skipped += 1
             continue
 
         existing_state = load_state(f.stem)
         if existing_state:
             print_info(f"Checkpoint found at step {existing_state.get('current_step', '?')}.")
-            ans2 = safe_input("Resume from checkpoint? (Y/N):", buffer=True).upper()
-            if ans2 != "Y":
+            if not ask_confirm("Resume from checkpoint?", default=True):
                 clear_state(f.stem)
                 existing_state = None
 
@@ -1335,7 +1159,7 @@ def option_batch():
             process_file(f, existing_state)
             processed += 1
         except KeyboardInterrupt:
-            print()
+            console.print()
             print_warn("Batch interrupted. Progress checkpointed.")
             break
         except Exception as e:
@@ -1344,9 +1168,9 @@ def option_batch():
             traceback.print_exc()
             skipped += 1
 
-    print()
+    console.print()
     print_section("BATCH COMPLETE")
-    print_ok(f"Processed: {C.WHITE}{processed}{C.RESET}")
+    print_ok(f"Processed: [white]{processed}[/white]")
     if skipped:
         print_info(f"Skipped:   {skipped}")
 
@@ -1357,35 +1181,29 @@ def option_resume():
         print_info("No interrupted jobs found.")
         return
 
-    print(f"  {C.DIM}{len(states)} interrupted job(s){C.RESET}")
-    print()
-    for i, s in enumerate(states, 1):
-        step  = s.get("current_step", "?")
-        fname = s.get("audio_filename", "unknown")
-        date  = s.get("meeting_date", "unknown date")
-        print(f"  {C.CYAN}[{i}]{C.RESET}  {C.WHITE}{fname}{C.RESET}  {C.DIM}·  {date}  ·  stopped at step {step}{C.RESET}")
-    print()
+    print_info(f"{len(states)} interrupted job(s)")
+    console.print()
 
-    choice = safe_input("Select job number (Enter to cancel):", buffer=True)
-    if not choice.isdigit() or not (1 <= int(choice) <= len(states)):
+    choices = [
+        Choice(
+            value=s["_stem"],
+            name=f"{s.get('audio_filename','unknown')}  ·  {s.get('meeting_date','?')}  ·  stopped at step {s.get('current_step','?')}",
+        )
+        for s in states
+    ]
+    picked_stem = ask_select("Select job to resume:", choices=choices)
+    if not picked_stem:
         return
 
-    s     = states[int(choice) - 1]
+    s     = next(x for x in states if x["_stem"] == picked_stem)
     fname = s.get("audio_filename", "")
-    stem  = s["_stem"]
-
-    candidates = [
-        DIR_NOT_TRANSCRIBED / fname,
-        DIR_COMPLETED       / fname,
-        ROOT                / fname,
-    ]
+    candidates = [DIR_NOT_TRANSCRIBED / fname, DIR_COMPLETED / fname, ROOT / fname]
     audio_path = next((c for c in candidates if c.exists()), DIR_NOT_TRANSCRIBED / fname)
 
-    ans = safe_input(f"Resume '{fname}' from step {s.get('current_step')}? (Y/N):", buffer=True).upper()
-    if ans != "Y":
+    if not ask_confirm(f"Resume '{fname}' from step {s.get('current_step')}?", default=True):
         return
 
-    process_file(audio_path, load_state(stem))
+    process_file(audio_path, load_state(picked_stem))
 
 def option_reprocess():
     print_section("REPROCESS FROM STEP")
@@ -1395,35 +1213,31 @@ def option_reprocess():
         print_info("Archives are saved automatically after transcription on future runs.")
         return
 
-    print(f"  {C.DIM}{len(archives)} transcript archive(s){C.RESET}")
-    print()
-    for i, a in enumerate(archives, 1):
-        fname   = a.get("audio_filename", "unknown")
-        date    = a.get("meeting_date", "unknown date")
-        dur     = a.get("audio_duration", 0)
-        dur_str = f"{int(dur)//60}m {int(dur)%60}s" if dur else "?"
-        print(f"  {C.CYAN}[{i}]{C.RESET}  {C.WHITE}{fname}{C.RESET}  {C.DIM}·  {date}  ·  {dur_str}{C.RESET}")
-    print()
+    print_info(f"{len(archives)} transcript archive(s)")
+    console.print()
 
-    choice = safe_input("Select archive (Enter to cancel):", buffer=True)
-    if not choice.isdigit() or not (1 <= int(choice) <= len(archives)):
+    choices = [
+        Choice(
+            value=a["_stem"],
+            name=f"{a.get('audio_filename','unknown')}  ·  {a.get('meeting_date','?')}  ·  {int(a.get('audio_duration',0))//60}m",
+        )
+        for a in archives
+    ]
+    picked_stem = ask_select("Select transcript archive:", choices=choices)
+    if not picked_stem:
         return
 
-    a     = archives[int(choice) - 1]
-    stem  = a["_stem"]
+    a    = next(x for x in archives if x["_stem"] == picked_stem)
     fname = a.get("audio_filename", "")
 
-    print()
-    print(f"  {C.DIM}RESTART FROM:{C.RESET}")
-    print(f"  {C.CYAN}[4]{C.RESET}  Speaker ID  {C.DIM}(re-runs diarization → summarise → save){C.RESET}")
-    print(f"  {C.CYAN}[5]{C.RESET}  Summarise   {C.DIM}(skips diarization, re-generates notes + PDF){C.RESET}")
-    print()
-
-    step_choice = safe_input("Choose step (4/5, Enter to cancel):", buffer=True)
-    if step_choice not in ("4", "5"):
+    step_choices = [
+        Choice(value="4", name="Speaker ID  (re-runs diarization → summarise → save)"),
+        Choice(value="5", name="Summarise   (skips diarization, re-generates notes + PDF)"),
+    ]
+    restart_step_str = ask_select("Restart from which step?", choices=step_choices)
+    if not restart_step_str:
         return
-
-    restart_step = int(step_choice)
+    restart_step = int(restart_step_str)
 
     state = {
         "current_step":   restart_step,
@@ -1444,55 +1258,51 @@ def option_reprocess():
         "pdf_path":       None,
     }
 
-    candidates = [
-        DIR_COMPLETED       / fname,
-        DIR_NOT_TRANSCRIBED / fname,
-        ROOT                / fname,
-    ]
+    candidates = [DIR_COMPLETED / fname, DIR_NOT_TRANSCRIBED / fname, ROOT / fname]
     audio_path = next((c for c in candidates if c.exists()), None)
-
     if audio_path is None:
         print_warn(f"Audio file not found: {fname}")
         print_info("Move the file back to 'Recordings/Not Transcribed/' and try again.")
         return
 
-    ans = safe_input(f"Restart from step {restart_step} for '{fname}'? (Y/N):", buffer=True).upper()
-    if ans != "Y":
+    if not ask_confirm(f"Restart from step {restart_step} for '{fname}'?", default=True):
         return
 
-    save_state(stem, state)
+    save_state(picked_stem, state)
     process_file(audio_path, state)
 
 # ---------------------------------------------------------------------------
 # Main menu
 # ---------------------------------------------------------------------------
 def print_main_menu():
-    w         = tw()
-    inner     = w - 4
-    spk_label = f"{C.GREEN}ENABLED{C.RESET}" if HF_TOKEN else f"{C.DIM}DISABLED{C.RESET}"
+    spk_label = "[green]ENABLED[/green]" if HF_TOKEN else "[dim]DISABLED[/dim]"
     model_tag = CLAUDE_MODEL.split("-")[1].upper() if "-" in CLAUDE_MODEL else CLAUDE_MODEL.upper()
-
-    print(f"  {C.BLUE}┌{'─' * inner}┐{C.RESET}")
-    print(f"  {C.BLUE}│{C.RESET}  {C.BOLD}{C.BLUE}LOCALPLAUD{C.RESET}  {C.DIM}·  private meeting transcription + summarisation{C.RESET}")
-    print(f"  {C.BLUE}│{C.RESET}  {C.DIM}SPEAKER ID:{C.RESET} {spk_label}   {C.DIM}WHISPER:{C.RESET} {C.WHITE}{WHISPER_MODEL}{C.RESET}   {C.DIM}CLAUDE:{C.RESET} {C.WHITE}{model_tag}{C.RESET}")
-    print(f"  {C.BLUE}└{'─' * inner}┘{C.RESET}")
-    print()
-    print(f"  {C.DIM}SELECT INPUT SOURCE{C.RESET}  {C.DIM}{'─' * 30}{C.RESET}")
-    print()
-    print(f"  {C.CYAN}[1]{C.RESET}  Browse for a file  {C.DIM}(opens file picker){C.RESET}")
-    print(f"  {C.CYAN}[2]{C.RESET}  Scan Not Transcribed folder")
-    print(f"  {C.CYAN}[3]{C.RESET}  Batch process queue")
-    print(f"  {C.CYAN}[4]{C.RESET}  Resume checkpoint")
-    print(f"  {C.CYAN}[5]{C.RESET}  Reprocess from step  {C.DIM}(redo speaker ID or summary){C.RESET}")
-    print()
+    console.print(Panel(
+        f"[dim]SPEAKER ID:[/dim] {spk_label}   [dim]WHISPER:[/dim] [white]{WHISPER_MODEL}[/white]   [dim]CLAUDE:[/dim] [white]{model_tag}[/white]",
+        title="[bold blue]LOCALPLAUD[/bold blue]  [dim]·  private meeting transcription + summarisation[/dim]",
+        border_style="blue",
+        padding=(0, 2),
+    ))
+    console.print()
 
 def main():
     startup_animation()
 
+    menu_choices = [
+        Choice(value="1", name="Browse for a file         (opens file picker)"),
+        Choice(value="2", name="Scan Not Transcribed folder"),
+        Choice(value="3", name="Batch process queue"),
+        Choice(value="4", name="Resume checkpoint"),
+        Choice(value="5", name="Reprocess from step       (redo speaker ID or summary)"),
+        Choice(value="q", name="Quit"),
+    ]
+
     while True:
         print_main_menu()
+        choice = ask_select("What would you like to do?", choices=menu_choices)
+        if choice is None or choice == "q":
+            break
 
-        choice = safe_input("Select [1-5]:")
         if choice == "1":
             option_browse()
         elif choice == "2":
@@ -1503,24 +1313,20 @@ def main():
             option_resume()
         elif choice == "5":
             option_reprocess()
-        else:
-            print_warn("Enter 1, 2, 3, 4, or 5.")
-            continue
 
-        print()
-        again = safe_input("Process another file? (Y/N):", buffer=True).upper()
-        if again != "Y":
+        console.print()
+        if not ask_confirm("Process another file?", default=True):
             break
 
-    print()
-    print(f"  {C.DIM}Goodbye.{C.RESET}")
-    print()
+    console.print()
+    console.print("  [dim]Goodbye.[/dim]")
+    console.print()
 
 if __name__ == "__main__":
     if "--doctor" in sys.argv:
         sys.exit(run_doctor())
     if not ANTHROPIC_API_KEY:
-        print(f"\n  {C.RED}[ERR]{C.RESET}  ANTHROPIC_API_KEY not set.")
-        print(f"  {C.DIM}       Run install.bat or add your key to .env{C.RESET}\n")
+        console.print("\n  [bold red]✗[/bold red]  ANTHROPIC_API_KEY not set.")
+        console.print("  [dim]       Run install.bat or add your key to .env[/dim]\n")
         sys.exit(1)
     main()
