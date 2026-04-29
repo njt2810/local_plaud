@@ -48,7 +48,7 @@ Installer creates a dedicated `.venv` (virtual environment), so LocalPlaud depen
 ### Speaker Identification
 - Powered by [pyannote.audio](https://github.com/pyannote/pyannote-audio)
 - Detects who is speaking and when
-- You name each speaker after a sample excerpt is shown
+- For each speaker, shows a contextual excerpt of **that speaker talking** before asking you to name them
 - Requires a HuggingFace account and token (free)
 - First run downloads ~1GB model
 
@@ -60,11 +60,30 @@ Installer creates a dedicated `.venv` (virtual environment), so LocalPlaud depen
 
 ### Resume / Recovery
 - If processing is interrupted (crash, Ctrl+C, power loss), your progress is checkpointed
-- Choose option 4 from the main menu to resume without re-transcribing
+- Choose **option 4** from the main menu to resume without re-transcribing
+
+### Reprocess from Step
+- Choose **option 5** from the main menu to redo part of a completed recording
+- **Speaker ID** — re-runs speaker detection and naming, then regenerates notes
+- **Summarise** — skips transcription and speaker ID entirely, just regenerates notes + PDF
+- Uses a permanent transcript archive (`_tx.json`) so you never have to re-transcribe
 
 ### Batch Processing
 - Process multiple recordings at once from the `Not Transcribed` folder
 - Each file gets its own output; you are prompted before each one
+
+---
+
+## Main Menu
+
+| Option | What it does |
+|--------|-------------|
+| 1 | Move audio file into the queue (`Not Transcribed` folder) |
+| 2 | Scan `Not Transcribed` folder and process new recordings |
+| 3 | Batch process the entire queue |
+| 4 | Resume a checkpoint (pick up where you left off) |
+| 5 | Reprocess from step — redo Speaker ID or Summary on a completed recording |
+| q | Quit |
 
 ---
 
@@ -89,7 +108,7 @@ LocalPlaud/
   .env                       - Your API keys and settings (keep private)
   context.md                 - Your permanent business context for Claude
   processing_log.txt         - History of all processed files
-  README.md                  - This file
+  error_log.jsonl            - Errors logged for diagnostics
 
   Recordings/
     Not Transcribed/         - Drop audio files here, or use option 1/2
@@ -98,6 +117,7 @@ LocalPlaud/
   Meeting Minutes/
     Markdown/                - YYYY-MM-DD_Work_MM_Topic.md
     PDF/                     - YYYY-MM-DD_Work_MM_Topic.pdf
+    Archives/                - _tx.json transcript archives (used by Reprocess)
 
   .localplaud_state/         - Checkpoint data for resume (hidden)
 ```
@@ -146,7 +166,6 @@ From the install folder:
 ```
 
 `--doctor` validates settings, imports, and writable folders. `smoke_test.py` is a quick non-interactive startup check.
-If you skip speaker ID during install, LocalPlaud now skips downloading speaker-ID packages.
 
 ### "Python not found" during install
 Make sure Python is installed and "Add to PATH" was ticked. Restart your terminal after installing Python.
@@ -156,8 +175,15 @@ Open `.env` in your install folder (it's a plain text file) and check the key is
 
 ### Speaker ID not working
 - Check your HuggingFace token is in `.env` as `HF_TOKEN=hf_xxx...`
-- On first run, it downloads a ~1GB model - this takes a few minutes
-- You must accept the pyannote model licence at huggingface.co/pyannote/speaker-diarization-3.1
+- On first run, it downloads a ~1GB model — this takes a few minutes
+- You must accept the pyannote model licence at [huggingface.co/pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+
+### Speaker ID silently skipped (no error shown)
+If Speaker ID runs but produces no labels, check `error_log.jsonl` in your install folder for the exact error. Common causes:
+
+- **`hf_hub_download() got an unexpected keyword argument 'use_auth_token'`** — version mismatch between pyannote and huggingface_hub. Make sure you are on the latest `localplaud.py`.
+- **`Weights only load failed`** — PyTorch 2.6 changed how model files are loaded. Make sure you are on the latest `localplaud.py` (it sets the official `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD` override automatically).
+- **`No module named 'matplotlib'`** — run `.venv\Scripts\pip install matplotlib` in your install folder.
 
 ### Transcription is slow
 - Use the `turbo` model (fastest)
@@ -168,10 +194,13 @@ Open `.env` in your install folder (it's a plain text file) and check the key is
 Make sure you have a PDF reader installed (Adobe Acrobat, Edge, or any PDF viewer).
 
 ### "AudioDecoder not defined" error
-This should not happen in this version - LocalPlaud uses the correct workaround for Windows. If you see it, make sure you're running the latest `localplaud.py` from this installer.
+This should not happen in this version — LocalPlaud uses the correct workaround for Windows. If you see it, make sure you're running the latest `localplaud.py` from this installer.
 
 ### The script crashed mid-transcription
 Use option 4 (Resume) from the main menu. Your transcript is saved and you won't need to re-transcribe.
+
+### I want to redo just the speaker names or summary
+Use option 5 (Reprocess from step). Choose **Speaker ID** to re-run speaker detection, or **Summarise** to just regenerate the notes with different context.
 
 ---
 

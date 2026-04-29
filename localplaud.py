@@ -547,26 +547,22 @@ def diarize(audio_path: Path, segments: list[dict]) -> tuple[list[dict], int]:
     print_ok(f"Detected [white]{len(all_speakers)} speaker(s)[/white]: {spk_tags}")
     console.print()
 
-    mid = len(labelled) // 2
-    excerpt = labelled[max(0, mid - 15) : min(len(labelled), mid + 15)]
-    console.print(Panel(
-        _render_excerpt(excerpt, speaker_color),
-        title="[bold cyan]TRANSCRIPT EXCERPT[/bold cyan]",
-        subtitle="[dim]middle of recording — all speakers shown[/dim]",
-        border_style="dim",
-        padding=(0, 1),
-    ))
-    console.print()
-
     console.print("  [bold cyan]NAME SPEAKERS[/bold cyan]  [dim]Press Enter to keep the label as-is[/dim]")
     console.print()
 
     name_map = {}
     for spk in all_speakers:
         color = speaker_color.get(spk, "white")
-        console.print(f"  [{color}]▶  {spk}[/]")
+        ctx = _find_contextual_excerpt(labelled, spk, window=10)
+        console.print(Panel(
+            _render_excerpt(ctx, speaker_color),
+            title=f"[{color}]▶  {spk}[/]  [dim]— sample of this speaker[/dim]",
+            border_style=color,
+            padding=(0, 1),
+        ))
         ans = ask_text("Name this speaker (Enter to keep):")
         name_map[spk] = ans if ans else spk
+        console.print()
 
     for seg in labelled:
         seg["speaker"] = name_map.get(seg["speaker"], seg["speaker"])
