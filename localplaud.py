@@ -399,7 +399,7 @@ def transcribe(audio_path: Path) -> tuple[list[dict], float]:
 
     with Progress(
         SpinnerColumn(),
-        TextColumn("[dim]{task.fields[snippet]}[/dim]", no_wrap=True),
+        TextColumn("[dim]{task.fields[snippet]}[/dim]"),
         BarColumn(bar_width=28),
         TextColumn("[cyan]{task.percentage:>3.0f}%[/cyan]"),
         TextColumn("[dim]{task.fields[time_str]}[/dim]"),
