@@ -464,10 +464,9 @@ def diarize(audio_path: Path, segments: list[dict]) -> tuple[list[dict], int]:
     import torch
 
     with Spinner("Loading pyannote speaker model  (first run ~1 GB download)"):
-        try:
-            pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=HF_TOKEN)
-        except TypeError:
-            pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=HF_TOKEN)
+        from huggingface_hub import login as _hf_login
+        _hf_login(token=HF_TOKEN, add_to_git_credential=False)
+        pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1")
 
     try:
         if torch.cuda.is_available():
