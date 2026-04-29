@@ -1,0 +1,4 @@
+faster-whisper==1.1.1
+anthropic==0.54.0
+reportlab==4.4.1
+python-dotenv==1.1.0

@@ -38,6 +38,7 @@ DIR_PDF             = ROOT / "Meeting Minutes" / "PDF"
 DIR_STATE           = ROOT / ".localplaud_state"
 FILE_CONTEXT        = ROOT / "context.md"
 FILE_LOG            = ROOT / "processing_log.txt"
+FILE_ERROR_LOG      = ROOT / "error_log.jsonl"
 
 AUDIO_EXTENSIONS = {".m4a", ".mp3", ".wav", ".ogg", ".flac", ".aac", ".wma", ".webm"}
 
@@ -204,6 +205,79 @@ def log(msg: str):
             f.write(line + "\n")
     except Exception:
         pass
+
+def log_error(event: str, error: Exception, extra: dict | None = None):
+    payload = {
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "event": event,
+        "error_type": type(error).__name__,
+        "error": str(error),
+    }
+    if extra:
+        payload["extra"] = extra
+    try:
+        with open(FILE_ERROR_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+def run_doctor() -> int:
+    print_section("LOCALPLAUD DOCTOR")
+    ok = True
+
+    checks = [
+        ("Recordings/Not Transcribed", DIR_NOT_TRANSCRIBED),
+        ("Recordings/Completed", DIR_COMPLETED),
+        ("Meeting Minutes/Markdown", DIR_MARKDOWN),
+        ("Meeting Minutes/PDF", DIR_PDF),
+        (".localplaud_state", DIR_STATE),
+    ]
+    for label, path in checks:
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            test_file = path / ".write_test.tmp"
+            test_file.write_text("ok", encoding="utf-8")
+            test_file.unlink(missing_ok=True)
+            print_ok(f"{label} is writable")
+        except Exception as e:
+            ok = False
+            print_err(f"{label} not writable: {e}")
+            log_error("doctor_path_check_failed", e, {"path": str(path)})
+
+    if ANTHROPIC_API_KEY:
+        print_ok("ANTHROPIC_API_KEY is set")
+    else:
+        ok = False
+        print_err("ANTHROPIC_API_KEY is missing")
+
+    print_info(f"Whisper model configured: {WHISPER_MODEL}")
+    print_info(f"Claude model configured: {CLAUDE_MODEL}")
+    if HF_TOKEN:
+        print_ok("HF_TOKEN is set (speaker ID enabled)")
+    else:
+        print_warn("HF_TOKEN is missing (speaker ID disabled)")
+
+    libs = [
+        "faster_whisper",
+        "anthropic",
+        "reportlab",
+        "dotenv",
+    ]
+    for lib in libs:
+        try:
+            __import__(lib)
+            print_ok(f"Import OK: {lib}")
+        except Exception as e:
+            ok = False
+            print_err(f"Import failed: {lib} ({e})")
+            log_error("doctor_import_failed", e, {"module": lib})
+
+    print()
+    if ok:
+        print_ok("Doctor checks passed.")
+        return 0
+    print_warn("Doctor found issues. Fix above items and retry.")
+    return 1
 
 def safe_input(prompt: str, buffer: bool = False) -> str:
     """input() with optional pre-sleep to absorb leftover newlines."""
@@ -1045,6 +1119,7 @@ def process_file(audio_path: Path, state: dict | None = None):
             except Exception as e:
                 print_warn(f"Speaker ID failed: {e}")
                 print_info("Continuing without speaker labels.")
+                log_error("diarization_failed", e, {"audio": str(audio_path)})
                 state["has_speakers"] = False
         state["current_step"] = 5
         save_state(stem, state)
@@ -1086,6 +1161,7 @@ def process_file(audio_path: Path, state: dict | None = None):
             state["pdf_path"] = str(pdf_path)
         except Exception as e:
             print_warn(f"PDF generation failed: {e}")
+            log_error("pdf_generation_failed", e, {"audio": state.get("audio_filename", "")})
             pdf_path = None
             state["pdf_path"] = None
 
@@ -1124,6 +1200,7 @@ def process_file(audio_path: Path, state: dict | None = None):
                     os.startfile(pdf_path)
                 except Exception as e:
                     print_warn(f"Could not open PDF: {e}")
+                    log_error("pdf_open_failed", e, {"pdf_path": str(pdf_path)})
                     print_info(f"Path: {pdf_path}")
 
 # ---------------------------------------------------------------------------
@@ -1148,6 +1225,7 @@ def pick_file_gui() -> Path | None:
         return Path(path) if path else None
     except Exception as e:
         print_warn(f"File picker unavailable: {e}")
+        log_error("file_picker_failed", e)
         return None
 
 def option_browse():
@@ -1262,6 +1340,7 @@ def option_batch():
             break
         except Exception as e:
             print_err(f"Failed: {e}")
+            log_error("batch_file_failed", e, {"audio": str(f)})
             traceback.print_exc()
             skipped += 1
 
@@ -1438,6 +1517,8 @@ def main():
     print()
 
 if __name__ == "__main__":
+    if "--doctor" in sys.argv:
+        sys.exit(run_doctor())
     if not ANTHROPIC_API_KEY:
         print(f"\n  {C.RED}[ERR]{C.RESET}  ANTHROPIC_API_KEY not set.")
         print(f"  {C.DIM}       Run install.bat or add your key to .env{C.RESET}\n")
