@@ -136,6 +136,19 @@ if exist "!INSTALLER_DIR!README.md" (
     copy /Y "!INSTALLER_DIR!README.md" "!INSTALL_DIR!\README.md" >nul
     echo [OK] README.md copied.
 )
+if exist "!INSTALLER_DIR!requirements.txt" (
+    copy /Y "!INSTALLER_DIR!requirements.txt" "!INSTALL_DIR!\requirements.txt" >nul
+    echo [OK] requirements.txt copied.
+)
+if exist "!INSTALLER_DIR!requirements-diarization.txt" (
+    copy /Y "!INSTALLER_DIR!requirements-diarization.txt" "!INSTALL_DIR!\requirements-diarization.txt" >nul
+    echo [OK] requirements-diarization.txt copied.
+)
+if not exist "!INSTALL_DIR!\scripts" mkdir "!INSTALL_DIR!\scripts" 2>nul
+if exist "!INSTALLER_DIR!scripts\smoke_test.py" (
+    copy /Y "!INSTALLER_DIR!scripts\smoke_test.py" "!INSTALL_DIR!\scripts\smoke_test.py" >nul
+    echo [OK] smoke_test.py copied.
+)
 echo.
 
 :: Create .env file
@@ -192,13 +205,28 @@ echo [INSTALL] Installing Python packages...
 echo          This may take a few minutes on first run.
 echo.
 
-echo [INSTALL] Core packages...
+echo [INSTALL] Creating virtual environment...
+python -m venv "!INSTALL_DIR!\.venv"
+if errorlevel 1 (
+    echo [ERROR] Failed to create virtual environment.
+    pause
+    exit /b 1
+)
+set PYTHON_EXE=!INSTALL_DIR!\.venv\Scripts\python.exe
+echo [OK] Virtual environment created.
+echo.
+
+echo [INSTALL] Core packages in virtual environment...
 echo STEP: Starting pip upgrade >> "%LOGFILE%"
-python -m pip install --upgrade pip --quiet
+"!PYTHON_EXE!" -m pip install --upgrade pip --quiet
 set PIP_EL=!errorlevel!
 echo STEP: pip upgrade done exit=!PIP_EL! >> "%LOGFILE%"
 echo STEP: Starting core install >> "%LOGFILE%"
-python -m pip install faster-whisper anthropic reportlab python-dotenv --quiet
+if exist "!INSTALLER_DIR!requirements.txt" (
+    "!PYTHON_EXE!" -m pip install -r "!INSTALLER_DIR!requirements.txt" --quiet
+) else (
+    "!PYTHON_EXE!" -m pip install faster-whisper anthropic reportlab python-dotenv --quiet
+)
 set PIP_EL=!errorlevel!
 echo STEP: core install done exit=!PIP_EL! >> "%LOGFILE%"
 if "!PIP_EL!" NEQ "0" (
@@ -218,7 +246,11 @@ if "!ENABLE_DIARIZATION!" NEQ "1" goto :skip_pyannote
 echo STEP: C-entering diarization >> "%LOGFILE%"
 echo [INSTALL] Speaker identification packages (pyannote, torchaudio)...
 echo           This is a large download (~2GB). Please wait...
-python -m pip install pyannote.audio torchaudio soundfile --quiet
+if exist "!INSTALLER_DIR!requirements-diarization.txt" (
+    "!PYTHON_EXE!" -m pip install -r "!INSTALLER_DIR!requirements-diarization.txt" --quiet
+) else (
+    "!PYTHON_EXE!" -m pip install pyannote.audio torchaudio soundfile --quiet
+)
 if errorlevel 1 (
     echo [WARN] Speaker ID packages failed. You can still use LocalPlaud without speaker ID.
     echo        To try again: pip install pyannote.audio torchaudio soundfile
@@ -234,22 +266,24 @@ echo STEP: Core packages installed >> "%LOGFILE%"
 
 :: Test imports
 echo [TEST] Verifying installation...
-python -c "import faster_whisper; print('[OK] faster_whisper')"
-python -c "import anthropic; print('[OK] anthropic')"
-python -c "import reportlab; print('[OK] reportlab')"
-python -c "import dotenv; print('[OK] python-dotenv')"
+"!PYTHON_EXE!" -c "import faster_whisper; print('[OK] faster_whisper')"
+"!PYTHON_EXE!" -c "import anthropic; print('[OK] anthropic')"
+"!PYTHON_EXE!" -c "import reportlab; print('[OK] reportlab')"
+"!PYTHON_EXE!" -c "import dotenv; print('[OK] python-dotenv')"
 if "!ENABLE_DIARIZATION!" NEQ "1" goto :skip_dia_imports
-python -c "import pyannote.audio; print('[OK] pyannote.audio')" 2>nul || echo [WARN] pyannote.audio import failed
-python -c "import torchaudio; print('[OK] torchaudio')" 2>nul || echo [WARN] torchaudio import failed
-python -c "import soundfile; print('[OK] soundfile')" 2>nul || echo [WARN] soundfile import failed
+"!PYTHON_EXE!" -c "import pyannote.audio; print('[OK] pyannote.audio')" 2>nul || echo [WARN] pyannote.audio import failed
+"!PYTHON_EXE!" -c "import torchaudio; print('[OK] torchaudio')" 2>nul || echo [WARN] torchaudio import failed
+"!PYTHON_EXE!" -c "import soundfile; print('[OK] soundfile')" 2>nul || echo [WARN] soundfile import failed
 :skip_dia_imports
 echo.
+"!PYTHON_EXE!" "!INSTALL_DIR!\localplaud.py" --doctor
+if exist "!INSTALL_DIR!\scripts\smoke_test.py" "!PYTHON_EXE!" "!INSTALL_DIR!\scripts\smoke_test.py"
 
 echo STEP: Imports verified >> "%LOGFILE%"
 
 :: Create launcher bat
 echo [CREATE] Creating launcher...
-python -c "p=r'!INSTALL_DIR!'; f=open(p+'\\Run LocalPlaud.bat','w'); f.write('@echo off\r\ncd /d '+chr(34)+p+chr(34)+'\r\npython localplaud.py\r\npause\r\n'); f.close()"
+python -c "p=r'!INSTALL_DIR!'; f=open(p+'\\Run LocalPlaud.bat','w'); f.write('@echo off\r\ncd /d '+chr(34)+p+chr(34)+'\r\n'+chr(34)+p+'\\.venv\\Scripts\\python.exe'+chr(34)+' localplaud.py\r\npause\r\n'); f.close()"
 echo STEP: Launcher created >> "%LOGFILE%"
 echo [OK] Launcher created.
 echo.

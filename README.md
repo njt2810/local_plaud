@@ -23,6 +23,8 @@ LocalPlaud listens to your meeting recordings and produces professional meeting 
 3. **Double-click `Run LocalPlaud.bat`** in your install folder
 4. Drop a recording into `Recordings\Not Transcribed\` and choose option 2
 
+Installer creates a dedicated `.venv` (virtual environment), so LocalPlaud dependencies are isolated from other Python apps.
+
 ---
 
 ## Installation Requirements
@@ -134,6 +136,17 @@ We are a 12-person SaaS startup building HR software for SMEs in Australia.
 ---
 
 ## Troubleshooting
+
+### Run health checks
+From the install folder:
+
+```bash
+.venv\Scripts\python.exe localplaud.py --doctor
+.venv\Scripts\python.exe scripts\smoke_test.py
+```
+
+`--doctor` validates settings, imports, and writable folders. `smoke_test.py` is a quick non-interactive startup check.
+If you skip speaker ID during install, LocalPlaud now skips downloading speaker-ID packages.
 
 ### "Python not found" during install
 Make sure Python is installed and "Add to PATH" was ticked. Restart your terminal after installing Python.
