@@ -7,6 +7,8 @@ paths = [
     ROOT / "Recordings" / "Completed",
     ROOT / "Meeting Minutes" / "Markdown",
     ROOT / "Meeting Minutes" / "PDF",
+    ROOT / "Meeting Minutes" / "Review",
+    ROOT / "Meeting Minutes" / "Transcripts",
     ROOT / ".localplaud_state",
 ]
 for p in paths:
