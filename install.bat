@@ -114,6 +114,8 @@ mkdir "!INSTALL_DIR!\Recordings\Not Transcribed" 2>nul
 mkdir "!INSTALL_DIR!\Recordings\Completed" 2>nul
 mkdir "!INSTALL_DIR!\Meeting Minutes\Markdown" 2>nul
 mkdir "!INSTALL_DIR!\Meeting Minutes\PDF" 2>nul
+mkdir "!INSTALL_DIR!\Meeting Minutes\Review" 2>nul
+mkdir "!INSTALL_DIR!\Meeting Minutes\Transcripts" 2>nul
 mkdir "!INSTALL_DIR!\.localplaud_state" 2>nul
 echo [OK] Folders created.
 echo STEP: Folders created >> "%LOGFILE%"

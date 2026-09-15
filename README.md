@@ -8,11 +8,10 @@
 
 LocalPlaud listens to your meeting recordings and produces professional meeting notes:
 
-- Full transcript with speaker labels (if enabled)
-- Action items with owners and due dates
-- Key decisions and discussion topics
-- Follow-up email draft ready to send
-- Markdown and PDF output
+- Gemini-style summary, decisions, next steps, and chronological details
+- Full editable transcript with speaker labels and timestamps
+- A review gate before any transcript text is sent to Claude
+- Meeting notes in Markdown and PDF, plus transcript Markdown
 
 ---
 
@@ -22,6 +21,7 @@ LocalPlaud listens to your meeting recordings and produces professional meeting 
 2. Follow the prompts (API key, optional HuggingFace token, model choice)
 3. **Double-click `Run LocalPlaud.bat`** in your install folder
 4. Drop a recording into `Recordings\Not Transcribed\` and choose option 2
+5. Review the generated Markdown file, then choose option 5 to finalize it
 
 Installer creates a dedicated `.venv` (virtual environment), so LocalPlaud dependencies are isolated from other Python apps.
 
@@ -48,23 +48,32 @@ Installer creates a dedicated `.venv` (virtual environment), so LocalPlaud depen
 ### Speaker Identification
 - Powered by [pyannote.audio](https://github.com/pyannote/pyannote-audio)
 - Detects who is speaking and when
-- For each speaker, shows a contextual excerpt of **that speaker talking** before asking you to name them
+- For each speaker, shows a contextual excerpt before asking you to name them
+- Type **M** to show more non-overlapping samples from elsewhere in the meeting
+- Stable speaker IDs let you swap a name once in the review file and update every utterance
 - Requires a HuggingFace account and token (free)
 - First run downloads ~1GB model
 
 ### AI Summarisation
 - Sends ONLY the text transcript to Claude (audio never leaves your machine)
-- Produces structured notes: TL;DR, action items, decisions, key topics, email draft
+- Sends nothing to Claude until you explicitly approve the review file
+- Produces Gemini-style notes: outcome-led summary, decisions, next steps, and timestamped details
 - Loads permanent business context from `context.md`
 - You can add one-time context per meeting (e.g., "Budget review with Franke Ltd")
+
+### Review Before Claude
+- After speaker identification, LocalPlaud creates an editable file in `Meeting Minutes\Review\`
+- Correct speaker names, transcript text, meeting context, and notes instructions in Markdown
+- Choose **option 5** only when the review is ready
+- LocalPlaud then makes one Claude request and creates the final notes, PDF, and transcript
 
 ### Resume / Recovery
 - If processing is interrupted (crash, Ctrl+C, power loss), your progress is checkpointed
 - Choose **option 4** from the main menu to resume without re-transcribing
 
 ### Reprocess from Step
-- Choose **option 5** from the main menu to redo part of a completed recording
-- **Speaker ID** — re-runs speaker detection and naming, then regenerates notes
+- Choose **option 6** from the main menu to redo part of a completed recording
+- **Speaker ID** — re-runs speaker detection and naming, then creates a new review file
 - **Summarise** — skips transcription and speaker ID entirely, just regenerates notes + PDF
 - Uses a permanent transcript archive (`_tx.json`) so you never have to re-transcribe
 
@@ -82,7 +91,8 @@ Installer creates a dedicated `.venv` (virtual environment), so LocalPlaud depen
 | 2 | Scan `Not Transcribed` folder and process new recordings |
 | 3 | Batch process the entire queue |
 | 4 | Resume a checkpoint (pick up where you left off) |
-| 5 | Reprocess from step — redo Speaker ID or Summary on a completed recording |
+| 5 | Finalize an approved review file and send its text to Claude |
+| 6 | Reprocess from step — redo Speaker ID or Summary on a completed recording |
 | q | Quit |
 
 ---
@@ -117,9 +127,10 @@ LocalPlaud/
   Meeting Minutes/
     Markdown/                - YYYY-MM-DD_Work_MM_Topic.md
     PDF/                     - YYYY-MM-DD_Work_MM_Topic.pdf
-    Archives/                - _tx.json transcript archives (used by Reprocess)
+    Review/                  - editable pre-Claude review files
+    Transcripts/             - final speaker-labelled transcript Markdown
 
-  .localplaud_state/         - Checkpoint data for resume (hidden)
+  .localplaud_state/         - checkpoints and _tx.json archives (hidden)
 ```
 
 ---
@@ -199,8 +210,17 @@ This should not happen in this version — LocalPlaud uses the correct workaroun
 ### The script crashed mid-transcription
 Use option 4 (Resume) from the main menu. Your transcript is saved and you won't need to re-transcribe.
 
+### I need to correct or swap speakers
+While naming a speaker, type **M** to see another sample. After transcription, edit the
+`Speaker Map` in the generated review Markdown file. Changing one mapping updates that
+speaker throughout the final transcript and notes without re-running transcription.
+
+### The meeting is waiting for review
+Open the file shown under `Meeting Minutes\Review\`, make any corrections, save it, and
+choose option 5 (**Finalize reviewed meeting**). Claude is not called before approval.
+
 ### I want to redo just the speaker names or summary
-Use option 5 (Reprocess from step). Choose **Speaker ID** to re-run speaker detection, or **Summarise** to just regenerate the notes with different context.
+Use option 6 (Reprocess from step). Choose **Speaker ID** to re-run speaker detection, or **Summarise** to just regenerate the notes with different context.
 
 ---
 
@@ -209,7 +229,7 @@ Use option 5 (Reprocess from step). Choose **Speaker ID** to re-run speaker dete
 | What                   | Where it goes         |
 |------------------------|-----------------------|
 | Audio file             | Stays on your machine |
-| Transcript text        | Sent to Claude API    |
+| Transcript text        | Sent to Claude only after review approval |
 | context.md contents    | Sent to Claude API    |
 | Meeting notes / PDF    | Stays on your machine |
 | API keys               | Stored in `.env` only |

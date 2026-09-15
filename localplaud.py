@@ -49,6 +49,8 @@ DIR_NOT_TRANSCRIBED = ROOT / "Recordings" / "Not Transcribed"
 DIR_COMPLETED       = ROOT / "Recordings" / "Completed"
 DIR_MARKDOWN        = ROOT / "Meeting Minutes" / "Markdown"
 DIR_PDF             = ROOT / "Meeting Minutes" / "PDF"
+DIR_REVIEW          = ROOT / "Meeting Minutes" / "Review"
+DIR_TRANSCRIPTS     = ROOT / "Meeting Minutes" / "Transcripts"
 DIR_STATE           = ROOT / ".localplaud_state"
 FILE_CONTEXT        = ROOT / "context.md"
 FILE_LOG            = ROOT / "processing_log.txt"
@@ -178,7 +180,8 @@ def safe_input(prompt: str, buffer: bool = False) -> str:
 # ---------------------------------------------------------------------------
 # Ensure folders exist
 # ---------------------------------------------------------------------------
-for _d in [DIR_NOT_TRANSCRIBED, DIR_COMPLETED, DIR_MARKDOWN, DIR_PDF, DIR_STATE]:
+for _d in [DIR_NOT_TRANSCRIBED, DIR_COMPLETED, DIR_MARKDOWN, DIR_PDF,
+           DIR_REVIEW, DIR_TRANSCRIPTS, DIR_STATE]:
     _d.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
@@ -217,6 +220,8 @@ def run_doctor() -> int:
         ("Recordings/Completed",       DIR_COMPLETED),
         ("Meeting Minutes/Markdown",   DIR_MARKDOWN),
         ("Meeting Minutes/PDF",        DIR_PDF),
+        ("Meeting Minutes/Review",     DIR_REVIEW),
+        ("Meeting Minutes/Transcripts", DIR_TRANSCRIPTS),
         (".localplaud_state",          DIR_STATE),
     ]
     for label, path in checks:
@@ -302,9 +307,9 @@ def tx_archive_path(stem: str) -> Path:
 
 def save_tx_archive(stem: str, state: dict):
     """Permanent transcript archive — survives completion, enables reprocess from any step."""
-    archive = {k: state[k] for k in (
+    archive = {k: state.get(k) for k in (
         "audio_filename", "meeting_date", "audio_duration",
-        "transcript", "user_context", "continuation",
+        "transcript", "user_context", "notes_instructions", "continuation",
     )}
     with open(tx_archive_path(stem), "w", encoding="utf-8") as f:
         json.dump(archive, f, ensure_ascii=False, indent=2)
@@ -365,7 +370,7 @@ def detect_date(audio_path: Path) -> str:
 # Transcription
 # ---------------------------------------------------------------------------
 def transcribe(audio_path: Path) -> tuple[list[dict], float]:
-    print_section("TRANSCRIBE", 3, 7)
+    print_section("TRANSCRIBE", 3, 8)
 
     try:
         import torch
@@ -424,19 +429,42 @@ def transcribe(audio_path: Path) -> tuple[list[dict], float]:
 # ---------------------------------------------------------------------------
 # Diarization helpers
 # ---------------------------------------------------------------------------
-def _find_contextual_excerpt(labelled: list[dict], target: str, window: int = 14) -> list[dict]:
-    UNNAMED = re.compile(r"^SPEAKER_\d+$", re.IGNORECASE)
+def _find_contextual_excerpts(labelled: list[dict], target: str,
+                              window: int = 10, max_samples: int = 8) -> list[list[dict]]:
+    """Return useful, non-overlapping samples for identifying one speaker.
+
+    Longer utterances are generally easier to recognise. After ranking on clarity,
+    samples are spread across the recording so "show more" does not repeat the
+    same moment of the meeting.
+    """
     appearances = [i for i, s in enumerate(labelled) if s["speaker"] == target]
     if not appearances:
         return []
-    best_start, best_score = max(0, appearances[0] - window // 2), -1
-    for idx in appearances:
+
+    ranked = sorted(
+        appearances,
+        key=lambda i: (len(labelled[i].get("text", "")), -i),
+        reverse=True,
+    )
+    chosen_ranges: list[tuple[int, int]] = []
+    samples: list[list[dict]] = []
+    for idx in ranked:
         start = max(0, idx - window // 2)
-        end   = min(len(labelled), start + window)
-        score = len({s["speaker"] for s in labelled[start:end] if s["speaker"] != target and not UNNAMED.match(s["speaker"])})
-        if score > best_score:
-            best_score, best_start = score, start
-    return labelled[best_start : min(len(labelled), best_start + window)]
+        end = min(len(labelled), start + window)
+        start = max(0, end - window)
+        # Avoid near-duplicate views of the same conversation turn.
+        if any(max(start, old_start) < min(end, old_end) for old_start, old_end in chosen_ranges):
+            continue
+        chosen_ranges.append((start, end))
+        samples.append(labelled[start:end])
+        if len(samples) >= max_samples:
+            break
+
+    if not samples:
+        idx = appearances[0]
+        start = max(0, idx - window // 2)
+        samples.append(labelled[start:min(len(labelled), start + window)])
+    return samples
 
 def _render_excerpt(excerpt: list[dict], speaker_color: dict) -> Text:
     text = Text()
@@ -457,7 +485,7 @@ def _render_excerpt(excerpt: list[dict], speaker_color: dict) -> Text:
 # Diarization
 # ---------------------------------------------------------------------------
 def diarize(audio_path: Path, segments: list[dict]) -> tuple[list[dict], int]:
-    print_section("SPEAKER ID", 4, 7)
+    print_section("SPEAKER ID", 4, 8)
 
     import os, sys
     import torch
@@ -539,7 +567,10 @@ def diarize(audio_path: Path, segments: list[dict]) -> tuple[list[dict], int]:
                 best_overlap, best = overlap, t["speaker"]
         return best or "UNKNOWN"
 
-    labelled     = [{**seg, "speaker": best_speaker(seg["start"], seg["end"])} for seg in segments]
+    labelled = []
+    for seg in segments:
+        speaker_id = best_speaker(seg["start"], seg["end"])
+        labelled.append({**seg, "speaker_id": speaker_id, "speaker": speaker_id})
     all_speakers = sorted({s["speaker"] for s in labelled})
     speaker_color = {spk: SPEAKER_COLORS[i % len(SPEAKER_COLORS)] for i, spk in enumerate(all_speakers)}
 
@@ -547,55 +578,38 @@ def diarize(audio_path: Path, segments: list[dict]) -> tuple[list[dict], int]:
     print_ok(f"Detected [white]{len(all_speakers)} speaker(s)[/white]: {spk_tags}")
     console.print()
 
-    console.print("  [bold cyan]NAME SPEAKERS[/bold cyan]  [dim]Press Enter to keep the label as-is[/dim]")
+    console.print("  [bold cyan]NAME SPEAKERS[/bold cyan]  [dim]Type M to show another sample · Enter to keep the label[/dim]")
     console.print()
 
     name_map = {}
     for spk in all_speakers:
         color = speaker_color.get(spk, "white")
-        ctx = _find_contextual_excerpt(labelled, spk, window=10)
-        console.print(Panel(
-            _render_excerpt(ctx, speaker_color),
-            title=f"[{color}]▶  {spk}[/]  [dim]— sample of this speaker[/dim]",
-            border_style=color,
-            padding=(0, 1),
-        ))
-        ans = ask_text("Name this speaker (Enter to keep):")
-        name_map[spk] = ans if ans else spk
-        console.print()
+        samples = _find_contextual_excerpts(labelled, spk, window=10)
+        sample_index = 0
+        while True:
+            ctx = samples[sample_index]
+            console.print(Panel(
+                _render_excerpt(ctx, speaker_color),
+                title=(f"[{color}]▶  {spk}[/]  [dim]— sample "
+                       f"{sample_index + 1} of {len(samples)}[/dim]"),
+                border_style=color,
+                padding=(0, 1),
+            ))
+            ans = ask_text("Name this speaker, M for more, or Enter to keep:")
+            if ans.strip().lower() in {"m", "more"}:
+                if sample_index + 1 < len(samples):
+                    sample_index += 1
+                else:
+                    print_info("No more distinct samples are available for this speaker.")
+                console.print()
+                continue
+            name_map[spk] = ans.strip() if ans.strip() else spk
+            console.print()
+            break
 
     for seg in labelled:
         seg["speaker"] = name_map.get(seg["speaker"], seg["speaker"])
     speaker_color = {name_map.get(old, old): col for old, col in speaker_color.items()}
-
-    UNNAMED = re.compile(r"^SPEAKER_\d+$", re.IGNORECASE)
-    unidentified = sorted({s["speaker"] for s in labelled if UNNAMED.match(s["speaker"])})
-
-    if unidentified:
-        console.print()
-        print_info(f"{len(unidentified)} speaker(s) still unidentified.")
-        print_info("Showing contextual excerpts — each alongside people you've already named.")
-
-        for spk in unidentified:
-            color   = speaker_color.get(spk, "magenta")
-            ctx     = _find_contextual_excerpt(labelled, spk, window=14)
-            console.print()
-            console.print(Panel(
-                _render_excerpt(ctx, speaker_color),
-                title=f"[yellow]UNIDENTIFIED:[/yellow]  [{color}]{spk}[/]",
-                border_style="yellow",
-                padding=(0, 1),
-            ))
-            console.print()
-            console.print(f"  [{color}]▶  {spk}[/]")
-            ans      = ask_text(f"Name this speaker (Enter to keep as '{spk}'):")
-            new_name = ans.strip() if ans.strip() else spk
-            if new_name != spk:
-                for seg in labelled:
-                    if seg["speaker"] == spk:
-                        seg["speaker"] = new_name
-                speaker_color[new_name] = speaker_color.pop(spk, color)
-                print_ok(f"[{color}]{spk}[/]  →  [white]{new_name}[/white]")
 
     console.print()
     final_speakers = sorted({s["speaker"] for s in labelled})
@@ -614,33 +628,185 @@ def format_transcript(segments: list[dict], has_speakers: bool) -> str:
         if has_speakers:
             spk = seg.get("speaker", "UNKNOWN")
             if spk != prev_speaker:
-                ts = f"[{int(seg['start']//60):02d}:{int(seg['start']%60):02d}]"
-                lines.append(f"\n{spk} {ts}:")
+                lines.append(f"\n{spk}:")
                 prev_speaker = spk
-            lines.append(f"  {seg['text']}")
+            lines.append(f"  [{_format_hms(seg.get('start', 0))}] {seg['text']}")
         else:
-            lines.append(seg["text"])
+            lines.append(f"[{_format_hms(seg.get('start', 0))}] {seg['text']}")
+    return "\n".join(lines)
+
+def _format_hms(seconds: float) -> str:
+    total = max(0, int(seconds))
+    return f"{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d}"
+
+def _parse_hms(value: str) -> float:
+    parts = [int(part) for part in value.strip().split(":")]
+    if len(parts) != 3:
+        raise ValueError(f"Invalid timestamp: {value}")
+    hours, minutes, seconds = parts
+    if minutes > 59 or seconds > 59:
+        raise ValueError(f"Invalid timestamp: {value}")
+    return float(hours * 3600 + minutes * 60 + seconds)
+
+def generate_review_markdown(state: dict) -> str:
+    """Create the human-editable gate between local processing and Claude."""
+    segments = state.get("transcript") or []
+    speaker_map: dict[str, str] = {}
+    for seg in segments:
+        speaker_id = seg.get("speaker_id") or seg.get("speaker") or "TRANSCRIPT"
+        speaker_map.setdefault(speaker_id, seg.get("speaker") or speaker_id)
+
+    lines = [
+        f"# {Path(state['audio_filename']).stem} - Review",
+        "",
+        "> Review speaker names, transcript text, context, and instructions below.",
+        "> LocalPlaud will not contact Claude until you choose Finalize reviewed meeting.",
+        "> To swap a speaker everywhere, edit only that entry in Speaker Map.",
+        "",
+        "## Meeting Date",
+        state.get("meeting_date") or "",
+        "",
+        "## Meeting Context",
+        state.get("user_context") or "",
+        "",
+        "## Notes Instructions",
+        state.get("notes_instructions") or "",
+        "",
+        "## Speaker Map",
+    ]
+    if state.get("has_speakers"):
+        for speaker_id, name in sorted(speaker_map.items()):
+            lines.append(f"- {speaker_id}: {name}")
+    else:
+        lines.append("No speaker labels available.")
+
+    lines.extend([
+        "",
+        "## Transcript",
+        "<!-- Keep each transcript segment on one line and preserve its stable speaker ID. -->",
+    ])
+    for seg in segments:
+        speaker_id = seg.get("speaker_id") or seg.get("speaker") or "TRANSCRIPT"
+        speaker = seg.get("speaker") or speaker_id
+        text = " ".join((seg.get("text") or "").splitlines()).strip()
+        lines.append(
+            f"[{_format_hms(seg.get('start', 0))} - {_format_hms(seg.get('end', 0))}] "
+            f"{speaker_id} [{speaker}]: {text}"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+def parse_review_markdown(review_path: Path) -> dict:
+    """Read user corrections from a LocalPlaud review Markdown file."""
+    raw = review_path.read_text(encoding="utf-8")
+    lines = raw.splitlines()
+    required = ["## Meeting Date", "## Meeting Context", "## Notes Instructions",
+                "## Speaker Map", "## Transcript"]
+    headings = {
+        line.strip(): i for i, line in enumerate(lines)
+        if line.strip() in required
+    }
+    missing = [heading for heading in required if heading not in headings]
+    if missing:
+        raise ValueError("Review file is missing section(s): " + ", ".join(missing))
+
+    def section_text(heading: str) -> str:
+        start = headings[heading] + 1
+        later = [idx for idx in headings.values() if idx > headings[heading]]
+        end = min(later) if later else len(lines)
+        return "\n".join(lines[start:end]).strip()
+
+    meeting_date = section_text("## Meeting Date").splitlines()[0].strip()
+    datetime.date.fromisoformat(meeting_date)
+    user_context = section_text("## Meeting Context")
+    notes_instructions = section_text("## Notes Instructions")
+
+    speaker_map: dict[str, str] = {}
+    for line in section_text("## Speaker Map").splitlines():
+        match = re.match(r"^\s*-\s*([^:]+):\s*(.+?)\s*$", line)
+        if match:
+            speaker_map[match.group(1).strip()] = match.group(2).strip()
+
+    segment_re = re.compile(
+        r"^\[(\d{2}:\d{2}:\d{2})\s+-\s+(\d{2}:\d{2}:\d{2})\]\s+"
+        r"(\S+)\s+\[(.*?)\]:\s*(.*)$"
+    )
+    segments = []
+    for line in section_text("## Transcript").splitlines():
+        if not line.strip() or line.lstrip().startswith("<!--"):
+            continue
+        match = segment_re.match(line)
+        if not match:
+            raise ValueError(f"Could not read transcript line: {line[:100]}")
+        start, end, speaker_id, inline_name, text = match.groups()
+        speaker = speaker_map.get(speaker_id, inline_name.strip() or speaker_id)
+        segments.append({
+            "start": _parse_hms(start),
+            "end": _parse_hms(end),
+            "speaker_id": speaker_id,
+            "speaker": speaker,
+            "text": text.strip(),
+        })
+    if not segments:
+        raise ValueError("No transcript segments found in the review file.")
+
+    has_speakers = any(seg["speaker_id"] != "TRANSCRIPT" for seg in segments)
+    speaker_count = len({seg["speaker"] for seg in segments}) if has_speakers else 0
+    return {
+        "meeting_date": meeting_date,
+        "user_context": user_context,
+        "notes_instructions": notes_instructions,
+        "transcript": segments,
+        "has_speakers": has_speakers,
+        "speaker_count": speaker_count,
+    }
+
+def generate_transcript_markdown(state: dict) -> str:
+    """Render a Gemini-style editable transcript with periodic time headings."""
+    title = Path(state["audio_filename"]).stem
+    duration = state.get("audio_duration", 0)
+    segments = state.get("transcript") or []
+    lines = [f"# {title} - Transcript", ""]
+    last_heading_at = -60.0
+    for seg in segments:
+        start = float(seg.get("start", 0))
+        if not lines or start - last_heading_at >= 60 or last_heading_at < 0:
+            lines.extend([f"## {_format_hms(start)}", ""])
+            last_heading_at = start
+        speaker = seg.get("speaker") if state.get("has_speakers") else "Speaker"
+        lines.extend([f"{speaker}: {seg.get('text', '').strip()}", ""])
+    lines.extend([
+        f"## Transcription ended after {_format_hms(duration)}",
+        "",
+        "This editable transcript was computer generated and may contain errors.",
+        "",
+    ])
     return "\n".join(lines)
 
 # ---------------------------------------------------------------------------
 # Claude summarisation
 # ---------------------------------------------------------------------------
 CLAUDE_PROMPT = """\
-You are an expert meeting notes assistant like Otter.ai or Plaud.
-You will receive the full transcript of a business meeting. Your job is to
-produce comprehensive, structured meeting notes that capture EVERYTHING discussed.
+You are an expert business meeting notes editor. Write in the concise,
+outcome-led style of Google Meet's "Notes by Gemini", while relying only on the
+provided transcript and context.
 
 {context_section}
 
 {user_context_section}
 
+{notes_instructions_section}
+
 CRITICAL RULES:
-- Cover ALL topics discussed -- do not skip any topic, even if it was brief
-- Use real names, companies, numbers, and dates from the transcript
-- Preserve proper nouns EXACTLY as spoken -- do not rename companies or people
-- Distinguish between "discussed" vs "decided" vs "suggested"
-- Do NOT invent anything not present in the transcript
-- Be thorough -- it is better to include too much than to miss something
+- Cover every substantive topic, but omit greetings, audio troubleshooting, and
+  unrelated small talk unless they materially affected the meeting.
+- Use real names, organisations, numbers, and dates from the transcript.
+- Preserve proper nouns exactly as provided; do not silently rename them.
+- Clearly distinguish discussion, proposals, alignment, decisions, and completed work.
+- Never convert a suggestion into a decision or invent an owner, deadline, or fact.
+- Use neutral, professional third-person wording.
+- Keep bullets concise while retaining the reasoning and specifics that matter.
+- Details must progress in meeting order and cite supporting timestamps as (HH:MM:SS).
 {speaker_rules}
 
 IMPORTANT: Your response MUST begin with this exact line:
@@ -648,45 +814,36 @@ TOPIC: [2-4 word topic in kebab-case, e.g. Strategy-Session, Client-Call-Franke,
 
 Then use EXACTLY these Markdown sections in this order:
 
-## Meeting Type
-Identify: Strategy Session / Standup / Client Call / Brainstorm / 1:1 / Other
-
-## TL;DR
-Maximum 3 lines. The absolute essence of this meeting.
-
-## Action Items
-Checkbox format, sorted by priority:
-{action_format}
-If none identified, write "No action items identified."
-
-## Decisions Made
-Bullet list of concrete decisions with brief rationale.
-If none: "No explicit decisions recorded."
-
-## Key Discussion Topics
-Group related items into sub-headings with 2-5 bullet points each:
-### [Topic Name]
-- Specific detail using real names, companies, and numbers
-
-## Open Questions / Parking Lot
-Items raised but not resolved or explicitly deferred.
-
 ## Summary
-4-6 sentence chronological narrative. Write so someone who wasn't there fully understands.
+Begin with one outcome-led sentence that captures the meeting as a whole.
+Then add 2-5 thematic subheadings using ###, each followed by 1-3 concise
+sentences describing the principal discussion and outcome. Do not use bullets
+in this section.
 
-## Key Quotes & Insights
-Notable statements that capture sentiment or important positions:
-{quotes_format}
+## Decisions
+### Aligned
+List only explicit decisions or clear alignment:
+- **Short decision title:** What was agreed and the material rationale.
+If none, write "No explicit decisions recorded."
 
-## Follow-Up Email Draft
-Professional email (3-4 paragraphs) to send to all attendees.
-Start with "Hi team," and end with "Best regards".
+## Next steps
+Use this exact action format:
+{action_format}
+Include only supported actions. Use [The group] only when responsibility was
+genuinely collective. If none, write "No next steps identified."
+
+## Details
+Create chronological bullets grouped by meaningful topics:
+- **Topic title:** A compact but sufficiently detailed synthesis naming the
+  relevant participants and preserving concrete facts. End with one or more
+  supporting timestamps such as (00:12:34) or (00:12:34) (00:18:02).
 
 TRANSCRIPT:
 {transcript}
 """
 
-def build_prompt(transcript_text: str, has_speakers: bool, user_context: str) -> str:
+def build_prompt(transcript_text: str, has_speakers: bool, user_context: str,
+                 notes_instructions: str = "") -> str:
     context_section = ""
     if FILE_CONTEXT.exists():
         ctx = FILE_CONTEXT.read_text(encoding="utf-8").strip()
@@ -697,33 +854,36 @@ def build_prompt(transcript_text: str, has_speakers: bool, user_context: str) ->
     if user_context.strip():
         user_context_section = f"MEETING-SPECIFIC CONTEXT:\n{user_context.strip()}"
 
+    notes_instructions_section = ""
+    if notes_instructions.strip():
+        notes_instructions_section = f"USER NOTES INSTRUCTIONS:\n{notes_instructions.strip()}"
+
     if has_speakers:
         speaker_rules = "- Attribute action items and quotes to specific speakers"
-        action_format = "- [ ] Person: Task -- due Date"
-        quotes_format = '"Quote" -- Speaker Name'
+        action_format = "- **[Full Name] Action title:** Clear description, including a deadline only when stated."
     else:
         speaker_rules = "- Do NOT assign action items to specific people (speakers not identified)"
-        action_format = "- [ ] Task -- due Date (no person)"
-        quotes_format = '"Quote" (no speaker attribution)'
+        action_format = "- **[Unassigned] Action title:** Clear description, including a deadline only when stated."
 
     return CLAUDE_PROMPT.format(
         context_section=context_section,
         user_context_section=user_context_section,
+        notes_instructions_section=notes_instructions_section,
         speaker_rules=speaker_rules,
         action_format=action_format,
-        quotes_format=quotes_format,
         transcript=transcript_text,
     )
 
-def summarise(segments: list[dict], has_speakers: bool, user_context: str) -> tuple[str, str, int, int, float]:
-    print_section("SUMMARISE", 5, 7)
+def summarise(segments: list[dict], has_speakers: bool, user_context: str,
+              notes_instructions: str = "") -> tuple[str, str, int, int, float]:
+    print_section("SUMMARISE", 6, 8)
     print_info(f"Model: [white]{CLAUDE_MODEL}[/white]")
 
     import anthropic
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     transcript_text = format_transcript(segments, has_speakers)
-    prompt          = build_prompt(transcript_text, has_speakers, user_context)
+    prompt          = build_prompt(transcript_text, has_speakers, user_context, notes_instructions)
 
     print_info(f"Transcript: [white]{len(transcript_text):,} chars[/white]  ·  Prompt: [white]{len(prompt):,} chars[/white]")
     console.print()
@@ -876,6 +1036,7 @@ def print_completion_card(state: dict):
     cost     = state.get("cost", 0.0)
     md_path  = state.get("md_path",  "")
     pdf_path = state.get("pdf_path", "")
+    transcript_path = state.get("transcript_path", "")
 
     dur_str = f"{dur/60:.0f} min  ·  {segs} segments"
     if spks:
@@ -890,6 +1051,8 @@ def print_completion_card(state: dict):
         t.add_row("Markdown", Path(md_path).name)
     if pdf_path:
         t.add_row("PDF",      Path(pdf_path).name)
+    if transcript_path:
+        t.add_row("Transcript", Path(transcript_path).name)
 
     console.print()
     console.print(Panel(
@@ -921,14 +1084,31 @@ def process_file(audio_path: Path, state: dict | None = None):
             "token_out":      0,
             "cost":           0.0,
             "user_context":   "",
+            "notes_instructions": "",
             "continuation":   None,
+            "awaiting_review": False,
+            "review_path":    None,
             "md_path":        None,
             "pdf_path":       None,
+            "transcript_path": None,
         }
+
+    # Backwards compatibility for checkpoints created by earlier releases.
+    state.setdefault("notes_instructions", "")
+    state.setdefault("awaiting_review", False)
+    state.setdefault("review_path", None)
+    state.setdefault("transcript_path", None)
+
+    if state.get("awaiting_review"):
+        print_warn("This meeting is waiting for transcript review.")
+        if state.get("review_path"):
+            print_info(f"Review file: {state['review_path']}")
+        print_info("Edit the Markdown file, then choose 'Finalize reviewed meeting'.")
+        return "awaiting_review"
 
     # Step 1: VALIDATE
     if state["current_step"] <= 1:
-        print_section("VALIDATE", 1, 7)
+        print_section("VALIDATE", 1, 8)
         if not audio_path.exists():
             print_err(f"File not found: {audio_path}")
             return
@@ -941,7 +1121,7 @@ def process_file(audio_path: Path, state: dict | None = None):
 
     # Step 2: DATE + context
     if state["current_step"] <= 2:
-        print_section("PREPARE", 2, 7)
+        print_section("PREPARE", 2, 8)
 
         if state["meeting_date"] is None:
             date = detect_date(audio_path)
@@ -997,26 +1177,49 @@ def process_file(audio_path: Path, state: dict | None = None):
         state["current_step"] = 5
         save_state(stem, state)
 
-    # Step 5: SUMMARISE
+    # Step 5: WRITE REVIEW FILE AND PAUSE BEFORE ANY CLAUDE REQUEST
     if state["current_step"] <= 5:
+        print_section("REVIEW TRANSCRIPT", 5, 8)
+        review_base = f"{state['meeting_date']}_{stem}_Review"
+        review_path = unique_path(DIR_REVIEW, review_base, ".md")
+        review_path.write_text(generate_review_markdown(state), encoding="utf-8")
+        state["review_path"] = str(review_path)
+        state["awaiting_review"] = True
+        state["current_step"] = 6
+        save_state(stem, state)
+        print_ok(f"Review file → [white]{review_path.name}[/white]")
+        print_info("No transcript text has been sent to Claude.")
+        print_info("Correct the file, then choose 'Finalize reviewed meeting' from the main menu.")
+        return "awaiting_review"
+
+    # Step 6: SUMMARISE THE USER-REVIEWED TRANSCRIPT
+    if state["current_step"] <= 6:
         if state["notes"] is None:
             (state["notes"], state["topic"],
              state["token_in"], state["token_out"],
-             state["cost"]) = summarise(state["transcript"], state["has_speakers"], state["user_context"])
-        state["current_step"] = 6
+             state["cost"]) = summarise(
+                 state["transcript"], state["has_speakers"],
+                 state["user_context"], state.get("notes_instructions", ""),
+             )
+        state["current_step"] = 7
         save_state(stem, state)
 
-    # Step 6: SAVE OUTPUT
-    if state["current_step"] <= 6:
-        print_section("SAVE OUTPUT", 6, 7)
+    # Step 7: SAVE OUTPUT
+    if state["current_step"] <= 7:
+        print_section("SAVE OUTPUT", 7, 8)
         date_str = state["meeting_date"]
         topic    = state["topic"]
         base     = f"{date_str}_Work_MM_{topic}"
         md_path  = unique_path(DIR_MARKDOWN, base, ".md")
         pdf_path = unique_path(DIR_PDF,      base, ".pdf")
+        transcript_path = unique_path(DIR_TRANSCRIPTS, f"{date_str}_{topic}_Transcript", ".md")
 
         md_path.write_text(state["notes"], encoding="utf-8")
         print_ok(f"Markdown → [white]{md_path.name}[/white]")
+
+        transcript_path.write_text(generate_transcript_markdown(state), encoding="utf-8")
+        print_ok(f"Transcript → [white]{transcript_path.name}[/white]")
+        state["transcript_path"] = str(transcript_path)
 
         try:
             with Spinner("Generating PDF"):
@@ -1030,12 +1233,12 @@ def process_file(audio_path: Path, state: dict | None = None):
             state["pdf_path"] = None
 
         state["md_path"]      = str(md_path)
-        state["current_step"] = 7
+        state["current_step"] = 8
         save_state(stem, state)
 
-    # Step 7: ORGANISE
-    if state["current_step"] <= 7:
-        print_section("ORGANISE", 7, 7)
+    # Step 8: ORGANISE
+    if state["current_step"] <= 8:
+        print_section("ORGANISE", 8, 8)
         if audio_path.exists():
             moved = safe_move(audio_path, DIR_COMPLETED)
             print_ok(f"Audio → Completed/{moved.name}")
@@ -1166,7 +1369,7 @@ def option_batch():
     print_info(f"{len(files)} file(s) in queue")
     console.print()
 
-    processed, skipped = 0, 0
+    processed, awaiting_review, skipped = 0, 0, 0
     for f in files:
         console.print(f"  [cyan]───[/cyan]  [white]{f.name}[/white]  [dim]({f.stat().st_size/1024/1024:.1f} MB)[/dim]")
         if not ask_confirm("Process this file?", default=True):
@@ -1181,8 +1384,11 @@ def option_batch():
                 existing_state = None
 
         try:
-            process_file(f, existing_state)
-            processed += 1
+            result = process_file(f, existing_state)
+            if result == "awaiting_review":
+                awaiting_review += 1
+            else:
+                processed += 1
         except KeyboardInterrupt:
             console.print()
             print_warn("Batch interrupted. Progress checkpointed.")
@@ -1196,14 +1402,19 @@ def option_batch():
     console.print()
     print_section("BATCH COMPLETE")
     print_ok(f"Processed: [white]{processed}[/white]")
+    if awaiting_review:
+        print_info(f"Awaiting review: {awaiting_review}")
     if skipped:
         print_info(f"Skipped:   {skipped}")
 
 def option_resume():
     print_section("RESUME CHECKPOINT")
-    states = list_incomplete_states()
+    all_states = list_incomplete_states()
+    states = [s for s in all_states if not s.get("awaiting_review")]
     if not states:
         print_info("No interrupted jobs found.")
+        if any(s.get("awaiting_review") for s in all_states):
+            print_info("Reviewed jobs are available under 'Finalize reviewed meeting'.")
         return
 
     print_info(f"{len(states)} interrupted job(s)")
@@ -1229,6 +1440,74 @@ def option_resume():
         return
 
     process_file(audio_path, load_state(picked_stem))
+
+def option_finalize_review():
+    print_section("FINALIZE REVIEWED MEETING")
+    states = [s for s in list_incomplete_states() if s.get("awaiting_review")]
+    if not states:
+        print_info("No meetings are awaiting review.")
+        return
+
+    choices = [
+        Choice(
+            value=s["_stem"],
+            name=(f"{s.get('audio_filename','unknown')}  ·  "
+                  f"{s.get('meeting_date','?')}  ·  review ready"),
+        )
+        for s in states
+    ]
+    picked_stem = ask_select("Select reviewed meeting:", choices=choices)
+    if not picked_stem:
+        return
+
+    state = next(s for s in states if s["_stem"] == picked_stem)
+    review_path = Path(state.get("review_path") or "")
+    if not review_path.is_file():
+        print_err(f"Review file not found: {review_path}")
+        return
+
+    try:
+        reviewed = parse_review_markdown(review_path)
+    except Exception as e:
+        print_err(f"Review file could not be read: {e}")
+        print_info("Fix the reported line or restore the required headings, then try again.")
+        log_error("review_parse_failed", e, {"review_path": str(review_path)})
+        return
+
+    print_ok(f"Review loaded: [white]{len(reviewed['transcript'])} segments[/white]")
+    print_info(f"Meeting date: {reviewed['meeting_date']}")
+    if reviewed["has_speakers"]:
+        names = sorted({seg["speaker"] for seg in reviewed["transcript"]})
+        print_info("Speakers: " + ", ".join(names))
+    if reviewed["notes_instructions"]:
+        print_info("Custom notes instructions found.")
+    console.print()
+    if not ask_confirm("Approve this review and send the transcript text to Claude?", default=False):
+        print_info("Nothing was sent. You can continue editing the review file.")
+        return
+
+    state.update(reviewed)
+    state["awaiting_review"] = False
+    state["current_step"] = 6
+    state["notes"] = None
+    state["topic"] = None
+    state["token_in"] = 0
+    state["token_out"] = 0
+    state["cost"] = 0.0
+    save_state(picked_stem, state)
+    save_tx_archive(picked_stem, state)
+
+    fname = state.get("audio_filename", "")
+    candidates = [DIR_NOT_TRANSCRIBED / fname, DIR_COMPLETED / fname, ROOT / fname]
+    audio_path = next((candidate for candidate in candidates if candidate.exists()), None)
+    if audio_path is None:
+        print_err(f"Audio file not found: {fname}")
+        print_info("Restore it to Recordings/Not Transcribed and try again.")
+        state["awaiting_review"] = True
+        save_state(picked_stem, state)
+        return
+
+    process_file(audio_path, state)
 
 def option_reprocess():
     print_section("REPROCESS FROM STEP")
@@ -1256,13 +1535,23 @@ def option_reprocess():
     fname = a.get("audio_filename", "")
 
     step_choices = [
-        Choice(value="4", name="Speaker ID  (re-runs diarization → summarise → save)"),
-        Choice(value="5", name="Summarise   (skips diarization, re-generates notes + PDF)"),
+        Choice(value="4", name="Speaker ID  (re-runs diarization → review → summarise → save)"),
+        Choice(value="6", name="Summarise   (uses archived transcript, re-generates notes + PDF)"),
     ]
     restart_step_str = ask_select("Restart from which step?", choices=step_choices)
     if not restart_step_str:
         return
     restart_step = int(restart_step_str)
+
+    archived_has_speakers = any(
+        (seg.get("speaker_id") or seg.get("speaker")) != "TRANSCRIPT"
+        and bool(seg.get("speaker"))
+        for seg in (a.get("transcript") or [])
+    )
+    archived_speaker_count = len({
+        seg.get("speaker") for seg in (a.get("transcript") or [])
+        if seg.get("speaker")
+    }) if archived_has_speakers else 0
 
     state = {
         "current_step":   restart_step,
@@ -1270,17 +1559,21 @@ def option_reprocess():
         "meeting_date":   a["meeting_date"],
         "transcript":     a["transcript"],
         "audio_duration": a.get("audio_duration", 0),
-        "has_speakers":   False,
-        "speaker_count":  0,
+        "has_speakers":   archived_has_speakers if restart_step == 6 else False,
+        "speaker_count":  archived_speaker_count if restart_step == 6 else 0,
         "notes":          None,
         "topic":          None,
         "token_in":       0,
         "token_out":      0,
         "cost":           0.0,
         "user_context":   a.get("user_context", ""),
+        "notes_instructions": a.get("notes_instructions", "") or "",
         "continuation":   a.get("continuation"),
+        "awaiting_review": False,
+        "review_path":    None,
         "md_path":        None,
         "pdf_path":       None,
+        "transcript_path": None,
     }
 
     candidates = [DIR_COMPLETED / fname, DIR_NOT_TRANSCRIBED / fname, ROOT / fname]
@@ -1318,7 +1611,8 @@ def main():
         Choice(value="2", name="Scan Not Transcribed folder"),
         Choice(value="3", name="Batch process queue"),
         Choice(value="4", name="Resume checkpoint"),
-        Choice(value="5", name="Reprocess from step       (redo speaker ID or summary)"),
+        Choice(value="5", name="Finalize reviewed meeting"),
+        Choice(value="6", name="Reprocess from step       (redo speaker ID or summary)"),
         Choice(value="q", name="Quit"),
     ]
 
@@ -1337,6 +1631,8 @@ def main():
         elif choice == "4":
             option_resume()
         elif choice == "5":
+            option_finalize_review()
+        elif choice == "6":
             option_reprocess()
 
         console.print()
